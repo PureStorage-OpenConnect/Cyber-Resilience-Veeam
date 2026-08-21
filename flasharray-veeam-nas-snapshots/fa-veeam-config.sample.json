@@ -1,0 +1,110 @@
+// Sample configuration for fa-file-veeam-snapshot-pre-backup.ps1 and -post-backup.ps1.
+//
+// Copy this file, name it after the job it serves, and pass it with -ConfigFile. Use one file per
+// Veeam file share / job -- the file name also becomes the profile name in the transcript names,
+// so 'mucfa75-nas.json' produces log\mucfa75-nas-<timestamp>-pre.log and -post.log.
+//
+// Every key can also be supplied as a script parameter or an environment variable. An explicit
+// parameter wins over this file, which wins over the environment.
+//
+// NEVER put an API token in this file. Point ApiTokenFile at an encrypted token written by
+// fa-veeam-credential-setup.ps1 instead.
+//
+// // and /* */ comments are supported. A '#' comment is NOT -- it fails to parse.
+
+{
+	// =============================================================================
+	// Required -- there is no sensible default for any of these.
+	// =============================================================================
+
+	// Management address of the FlashArray.
+	"Endpoint": "fa01.lab.local",
+
+	// Encrypted API token written by fa-veeam-credential-setup.ps1.
+	"ApiTokenFile": "C:\\01_SCRIPTS\\fa-nas-snapshots\\fa01.apitoken",
+
+	// Managed directory holding the share, as shown on the FlashArray.
+	"SnapDirectory": "user-shares01::user-shares01:lab-files",
+
+	// The file share exactly as it appears in the Veeam inventory.
+	//   SMB: \\172.16.16.15\lab-files
+	//   NFS: 172.16.16.15:/lab-files
+	"FileSharePath": "\\\\172.16.16.15\\lab-files",
+
+	// =============================================================================
+	// Veeam authentication -- required on v13, where job scripts run as the Veeam
+	// Backup Service account. That is LOCAL SYSTEM by default, which presents as the
+	// machine account, and Veeam authenticates only local and domain user accounts,
+	// so a machine account cannot be given a role. Point this at a dedicated Veeam
+	// user: DOMAIN\Username or UPN, or HOSTNAME\Username on a workgroup server.
+	// Omit both keys to use the inherited identity instead.
+	// Pre-backup script only; the post-backup script never talks to Veeam.
+	// =============================================================================
+
+	"VBRUser": "CXC-VEEAM-VBR\\veeam-automation",
+	"VBRPasswordFile": "C:\\01_SCRIPTS\\fa-nas-snapshots\\vbr.pwd",
+
+	// =============================================================================
+	// Everything below has a working default. Change it only if you need to.
+	// =============================================================================
+
+	// Snapshot naming. The array builds '<SnapDirectory>.<SnapClientName>.<SnapSuffixPrefix><timestamp>',
+	// and the client sees '<SnapClientName>.<SnapSuffixPrefix><timestamp>' under .snapshot.
+	// SnapshotMatchPattern must match what these two produce: it is how the post-backup
+	// script recognises its own snapshots, and it is the only thing standing between a
+	// cleanup run and someone else's snapshots.
+	"SnapClientName": "Veeam",
+	"SnapSuffixPrefix": "Backup",
+	"SnapshotMatchPattern": "Veeam\\.Backup\\d{14}",
+
+	// Where the array exposes snapshots inside the share. Rarely anything else.
+	"SnapshotRootDirName": ".snapshot",
+
+	// Backstop expiry only -- the post-backup script does the routine cleanup, so this
+	// matters when a job dies before its post script runs. Duration: '7d', '48h',
+	// '1d12h', '6h30m', '90m', or 'none' for no expiry. The array accepts 5m to 365d.
+	"SnapLifetime": "7d",
+
+	// Veeam backup server. localhost is correct when the scripts run on it, which is
+	// where Veeam runs job scripts. Pre-backup only.
+	"VBRServer": "localhost",
+
+	// Accept the backup server's TLS certificate without validating it. A stock Veeam
+	// installation presents a self-signed certificate and Connect-VBRServer would
+	// prompt to accept it -- unanswerable under the Veeam Backup Service, so the job
+	// stalls until Veeam's 15-minute script timeout. Set false only where the
+	// certificate is trusted by this machine; the pre-backup script then validates it
+	// and fails fast instead of hanging.
+	"ForceAcceptTlsCertificate": true,
+
+	// Skip TLS certificate validation when connecting to the FlashArray. True matches
+	// the array's default self-signed certificate. Set false once you have installed a
+	// certificate the Veeam server trusts.
+	"IgnoreCertificateError": true,
+
+	// Also force the share's processing mode to StorageSnapshot. Off by default, so the
+	// mode stays as configured in the Veeam console and the scripts change only the
+	// snapshot path. Turn on if you would rather the script enforce the mode too.
+	"SetProcessingModeStorageSnapshot": false,
+
+	// Exit 1 when the post-backup script finds no snapshot to clean up. Off by default,
+	// because nothing to clean up is a normal outcome -- the snapshot may already have
+	// expired via SnapLifetime -- and failing the job over it is noise.
+	"FailIfNoSnapshots": false,
+
+	// Pre-backup only. After repointing Veeam, destroy older matching snapshots left by
+	// runs whose cleanup never completed. Off by default so a run only ever removes what
+	// it is responsible for.
+	"SweepOrphans": false,
+
+	// Pre-backup only. Set true to leave the storage snapshot path untouched when the
+	// pre-backup script fails. Leave it false unless you watch the session log for
+	// pre-script warnings yourself: Veeam only warns when a pre-job script fails and
+	// carries on with the job, so the unreadable path is what stops a failed run from
+	// backing up stale data and reporting success.
+	"NoFailSafePath": false,
+
+	// Delete this profile's transcripts once they are older than this many days. 0 keeps
+	// them forever. Transcripts are plain text and small; they hold no secrets.
+	"LogRetentionDays": 30
+}

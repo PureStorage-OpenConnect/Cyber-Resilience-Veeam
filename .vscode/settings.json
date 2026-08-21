@@ -1,0 +1,8 @@
+{
+	// The configuration files these scripts read are parsed by ConvertFrom-Json, which accepts
+	// // and /* */ comments. Strict JSON does not, so without this association the editor
+	// reports every comment in fa-veeam-config.sample.json as an error.
+	"files.associations": {
+		"*.json": "jsonc"
+	}
+}
