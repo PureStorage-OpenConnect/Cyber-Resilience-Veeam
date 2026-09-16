@@ -1,4 +1,4 @@
-# Modern-Data-Protection-Veeam
+# Cyber-Resilience-Veeam
 
 Veeam Backup & Replication automation and orchestration scripts for Everpure storage systems.
 
