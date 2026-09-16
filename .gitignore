@@ -1,0 +1,15 @@
+# Script transcripts
+log/
+*.log
+
+# The default configuration file name. Job-specific copies are named after the job, so they
+# cannot be matched here -- keep them on the Veeam server, not in a clone.
+# fa-veeam-config.sample.json stays tracked.
+fa-veeam-config.json
+
+# Encrypted credentials -- never commit these
+*.apitoken
+*.cred
+*.clixml
+*.secret
+*.pwd

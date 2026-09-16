@@ -1,0 +1,13 @@
+Modern-Data-Protection-Veeam
+Copyright 2026 Everpure, Inc.
+
+This product includes software developed at Everpure, Inc.
+
+Licensed under the Apache License, Version 2.0. See the LICENSE file for the
+full terms.
+
+The FlashBlade example scripts in the repository root
+(fb-file-veeam-snapshot-pre-backup-script-example.ps1,
+fb-file-veeam-snapshot-post-backup-script-example.ps1 and
+veeam-fb-multi-obj-account-setup.ps1) predate this license and carry no
+per-file notice of their own. They are covered by this file and by LICENSE.
