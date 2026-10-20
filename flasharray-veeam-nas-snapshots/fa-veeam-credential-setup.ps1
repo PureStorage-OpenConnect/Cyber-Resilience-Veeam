@@ -99,7 +99,7 @@
 
 .EXAMPLE
 	.\fa-veeam-credential-setup.ps1 -Path C:\01_SCRIPTS\fa-nas-snapshots\vbr.pwd -SecretType VeeamPassword `
-		-VBRUser 'CXC-VEEAM-VBR\veeam-automation' -Verify
+		-VBRUser 'VBR01\veeam-automation' -Verify
 
 	Writes the Veeam password, then proves it opens a Veeam session and can read the inventory.
 

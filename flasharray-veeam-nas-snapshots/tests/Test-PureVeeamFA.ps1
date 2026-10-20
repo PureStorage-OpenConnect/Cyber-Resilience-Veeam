@@ -395,16 +395,16 @@ try {
 	$logDir = Join-Path $tmp 'log'
 	$scriptPath = Join-Path $tmp 'fa-file-veeam-snapshot-pre-backup.ps1'
 	$pre = Start-PureVeeamLog -ScriptPath $scriptPath -Phase 'pre' `
-		-ConfigPath (Join-Path $tmp 'mucfa75-nas.json') -LogDirectory $logDir -RetentionDays 0 6>$null
+		-ConfigPath (Join-Path $tmp 'fa01-nas.json') -LogDirectory $logDir -RetentionDays 0 6>$null
 	Stop-PureVeeamLog
 	Assert-Equal 'name is <profile>-<timestamp>-pre.log' `
-		([bool]((Split-Path -Leaf $pre) -match '^mucfa75-nas-\d{14}-pre\.log$')) 'True'
+		([bool]((Split-Path -Leaf $pre) -match '^fa01-nas-\d{14}-pre\.log$')) 'True'
 
 	$post = Start-PureVeeamLog -ScriptPath $scriptPath -Phase 'post' `
-		-ConfigPath (Join-Path $tmp 'mucfa75-nas.json') -LogDirectory $logDir -RetentionDays 0 6>$null
+		-ConfigPath (Join-Path $tmp 'fa01-nas.json') -LogDirectory $logDir -RetentionDays 0 6>$null
 	Stop-PureVeeamLog
 	Assert-Equal 'post phase is in the name' `
-		([bool]((Split-Path -Leaf $post) -match '^mucfa75-nas-\d{14}-post\.log$')) 'True'
+		([bool]((Split-Path -Leaf $post) -match '^fa01-nas-\d{14}-post\.log$')) 'True'
 
 	$noProfile = Start-PureVeeamLog -ScriptPath $scriptPath -Phase 'pre' -LogDirectory $logDir -RetentionDays 0 6>$null
 	Stop-PureVeeamLog

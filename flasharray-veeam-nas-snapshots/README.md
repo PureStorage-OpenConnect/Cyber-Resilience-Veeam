@@ -96,7 +96,7 @@ and Roles**, then store its password the same way as the API token:
 
 ```powershell
 .\fa-veeam-credential-setup.ps1 -Path C:\01_SCRIPTS\fa-nas-snapshots\vbr.pwd `
-    -SecretType VeeamPassword -VBRUser 'CXC-VEEAM-VBR\veeam-automation' -Verify
+    -SecretType VeeamPassword -VBRUser 'VBR01\veeam-automation' -Verify
 ```
 
 `-Verify` opens a real Veeam session with that credential and reads the inventory back, so a wrong
@@ -105,7 +105,7 @@ password or a missing role fails here rather than inside a backup job.
 Add both to the configuration:
 
 ```json
-"VBRUser": "CXC-VEEAM-VBR\\veeam-automation",
+"VBRUser": "VBR01\\veeam-automation",
 "VBRPasswordFile": "C:\\01_SCRIPTS\\fa-nas-snapshots\\vbr.pwd"
 ```
 
@@ -144,7 +144,7 @@ Veeam connection preflight:
   Port reachable : True
   Certificate    : NOT trusted (RemoteCertificateChainErrors)
   Interactive    : False
-  Authenticating : explicit credential 'CXC-VEEAM-VBR\veeam-automation'
+  Authenticating : explicit credential 'VBR01\veeam-automation'
 ```
 
 An untrusted certificate in a non-interactive session is then a hard stop: the script fails in
@@ -155,8 +155,8 @@ since the prompt is answerable there.
 
 Copy [fa-veeam-config.sample.json](fa-veeam-config.sample.json) and edit it. Use **one file per
 file share / job** and pass it with `-ConfigFile`. Name it after the job — the file name becomes
-the profile name in the transcript file names, so `mucfa75-nas.json` produces
-`log\mucfa75-nas-<timestamp>-pre.log`.
+the profile name in the transcript file names, so `fa01-nas.json` produces
+`log\fa01-nas-<timestamp>-pre.log`.
 
 The sample is grouped: everything that must be set is at the top, everything with a working
 default below it. `//` and `/* */` **comments are supported** — `ConvertFrom-Json` accepts them,
@@ -277,7 +277,7 @@ timed out, the session log recorded a *warning* and carried straight on to build
 ESucceeded  Job started at 21.08.2026 13:23:08
   EWarning  Pre-job script timed out
 ESucceeded  Building tasks list
-   EFailed  Processing 192.168.202.95:/... Error: Cannot find a storage snapshot at the
+   EFailed  Processing 192.0.2.10:/... Error: Cannot find a storage snapshot at the
             specified path, and failover to direct backup from the file share is disabled
 ```
 
@@ -347,10 +347,10 @@ absolute path avoids the guesswork.
   together and keeps each run's pre and post next to each other:
 
   ```
-  mucfa75-nas-20260821134519-pre.log
-  mucfa75-nas-20260821134740-post.log
-  mucfa75-smb-20260821140002-pre.log
-  mucfa75-smb-20260821140233-post.log
+  fa01-nas-20260821134519-pre.log
+  fa01-nas-20260821134740-post.log
+  fa01-smb-20260821140002-pre.log
+  fa01-smb-20260821140233-post.log
   ```
 
   Runs configured entirely from parameters and the environment have no profile name and use

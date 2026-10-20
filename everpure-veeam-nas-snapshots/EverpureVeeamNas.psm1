@@ -1,0 +1,68 @@
+# Copyright 2026 Everpure, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+<#  Disclaimer
+	The sample module and documentation are provided AS IS and are not supported by
+	the author or the author's employer, unless otherwise agreed in writing. You bear
+	all risk relating to the use or performance of the sample script and documentation.
+	The author and the author's employer disclaim all express or implied warranties
+	(including, without limitation, any warranties of merchantability, title, infringement
+	or fitness for a particular purpose). In no event shall the author, the author's employer
+	or anyone else involved in the creation, production, or delivery of the scripts be liable
+	for any damages whatsoever arising out of the use or performance of the sample script and
+	documentation (including, without limitation, damages for loss of business profits,
+	business interruption, loss of business information, or other pecuniary loss), even if
+	such person has been advised of the possibility of such damages. #>
+
+<#
+	Everpure NAS backup-from-snapshot helpers for Veeam Backup & Replication 13.1.
+
+	One code base for FlashArray File and FlashBlade, SMB and NFS, Windows backup servers and
+	the Veeam Software Appliance. PowerShell 7 and REST only: no Pure SDK module and, on the
+	appliance, no Veeam module. The layers in lib/ are dot-sourced here in dependency order.
+
+	Set-StrictMode is deliberately off: Veeam inventory objects and REST documents vary between
+	releases, and a strict-mode failure on a missing property would hide the descriptive errors.
+#>
+
+#Requires -Version 7.0
+#Requires -PSEdition Core
+
+$script:EvpModuleRoot = $PSScriptRoot
+
+# Module functions run with the module's own preference, not the caller's. Without this a .NET
+# method exception (file access denied, for example) is written and execution carries on, which
+# produced a transcript saying "Wrote secret" after the write had failed.
+$ErrorActionPreference = 'Stop'
+
+foreach ($layer in 'Common', 'Secrets', 'Logging', 'Http', 'Veeam', 'Pure', 'Orchestrate') {
+	. (Join-Path $PSScriptRoot 'lib' "$layer.ps1")
+}
+
+function Get-EvpModuleRoot {
+	<# Install root of this module, used for the default log directory on Windows. #>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param()
+	return $script:EvpModuleRoot
+}
+
+Export-ModuleMember -Function @(
+	# Common
+	'Get-EvpPlatform', 'Initialize-EvpEnvironment', 'Get-EvpConfig', 'ConvertTo-EvpMilliseconds',
+	'Get-EvpShareProtocol', 'Split-EvpSharePath', 'Get-EvpNormalizedSharePath', 'Get-EvpStorageSnapshotPath',
+	'Get-EvpTimestamp', 'New-EvpSnapshotName', 'Get-EvpSnapshotMatchPattern', 'Get-EvpSnapshotTimestamp', 'Get-EvpSentinelDirectoryName',
+	# Secrets
+	'ConvertFrom-EvpSecureString', 'Protect-EvpSecret', 'Unprotect-EvpSecret', 'Test-EvpSecretFile',
+	# Logging
+	'Get-EvpDefaultLogDirectory', 'Start-EvpLog', 'Stop-EvpLog', 'Write-EvpSection',
+	# Http
+	'Set-EvpHttpInvoker', 'Invoke-EvpHttp', 'Get-EvpHttpErrorText',
+	# Veeam
+	'Connect-EvpVeeam', 'Disconnect-EvpVeeam', 'Test-EvpVeeamModule', 'Get-EvpVeeamShares', 'Find-EvpVeeamShare', 'Set-EvpVeeamStorageSnapshotPath',
+	# Pure
+	'Connect-EvpArray', 'Invoke-EvpArrayApi', 'Resolve-EvpArraySource', 'New-EvpArraySnapshot', 'Get-EvpArraySnapshots', 'Remove-EvpArraySnapshots',
+	# Orchestrate
+	'Get-EvpExitCodeTable', 'Write-EvpPlan', 'Invoke-EvpPrePhase', 'Invoke-EvpPostPhase', 'Invoke-EvpVerifyPhase',
+	'Get-EvpModuleRoot'
+)

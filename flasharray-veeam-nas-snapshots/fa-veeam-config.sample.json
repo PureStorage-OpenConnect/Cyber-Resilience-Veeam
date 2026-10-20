@@ -2,7 +2,7 @@
 //
 // Copy this file, name it after the job it serves, and pass it with -ConfigFile. Use one file per
 // Veeam file share / job -- the file name also becomes the profile name in the transcript names,
-// so 'mucfa75-nas.json' produces log\mucfa75-nas-<timestamp>-pre.log and -post.log.
+// so 'fa01-nas.json' produces log\fa01-nas-<timestamp>-pre.log and -post.log.
 //
 // Every key can also be supplied as a script parameter or an environment variable. An explicit
 // parameter wins over this file, which wins over the environment.
@@ -41,7 +41,7 @@
 	// Pre-backup script only; the post-backup script never talks to Veeam.
 	// =============================================================================
 
-	"VBRUser": "CXC-VEEAM-VBR\\veeam-automation",
+	"VBRUser": "VBR01\\veeam-automation",
 	"VBRPasswordFile": "C:\\01_SCRIPTS\\fa-nas-snapshots\\vbr.pwd",
 
 	// =============================================================================

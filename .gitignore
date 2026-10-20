@@ -13,3 +13,12 @@ fa-veeam-config.json
 *.clixml
 *.secret
 *.pwd
+
+# Lab notes, probe reports and repro material carry lab host names; they stay local.
+lab/
+
+# Unified scripts (everpure-veeam-nas-snapshots): per-job files and secrets stay on the backup
+# server, never in a clone. config.sample.jsonc stays tracked.
+everpure-veeam-nas-snapshots/jobs/
+everpure-veeam-nas-snapshots/secrets/
+*.token

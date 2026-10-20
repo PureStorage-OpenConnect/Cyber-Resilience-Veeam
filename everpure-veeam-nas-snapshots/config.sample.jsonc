@@ -1,0 +1,107 @@
+// Sample configuration for Invoke-EverpureVeeamNasSnapshot.ps1. One file per Veeam file backup job.
+//
+// Copy it, name it after the job (the file name becomes the profile name in the log file names),
+// and pass it with -ConfigFile. Relative paths resolve against this file's directory, so the same
+// file works on a Windows backup server and on the Veeam Software Appliance.
+//
+// NEVER put a token or password in this file. Point at files written by
+// Protect-EverpureVeeamSecret.ps1 instead. // and /* */ comments are allowed; '#' is not.
+{
+	"Veeam": {
+		// auto: Veeam PowerShell module when it imports (Windows backup server), REST otherwise
+		// (appliance). Or force "PowerShell" / "Rest".
+		"Backend": "auto",
+
+		// Backup server. "localhost" is fine on Windows. On the appliance the firewall rejects
+		// loopback from job scripts: use the appliance FQDN or LAN address there.
+		"Server": "localhost",
+
+		// REST API port (REST backend only).
+		"Port": 9419,
+
+		// Optional explicit Veeam user. Windows: usually not needed; the job runs as the Veeam
+		// service account and connects implicitly. Set it if that connection is refused
+		// ("Failed to connect to Identity service"). REST backend: required; a local Veeam user
+		// flagged as service account (MFA off) holding Backup Administrator.
+		// "User": "VBR01\\veeam-automation",
+		// "PasswordFile": "secrets/vbr.pwd",
+
+		// REST backend TLS: "skip" (default; stock Veeam certificate is self-signed), "system"
+		// (trust store) or "thumbprint:<SHA-1 or SHA-256 hex>".
+		"Tls": "skip",
+
+		// PowerShell backend: accept the backup server certificate without validation. Keep true
+		// unless the certificate is trusted; otherwise Connect-VBRServer prompts and the job
+		// script hangs until Veeam's 15-minute timeout.
+		"ForceAcceptTlsCertificate": true,
+
+		// REST backend only. Veeam 13.1.1.x maps the REST processingMode to the wrong internal
+		// mode (Veeam case #08278019): the job silently reads the live share. The REST backend
+		// therefore refuses those builds. Set true only to test at your own risk.
+		"AcknowledgeRestDefect": false
+	},
+
+	// Every array the job's shares live on. Platform "auto" detects FlashArray vs FlashBlade.
+	"Arrays": [
+		{ "Name": "fa01", "Endpoint": "fa01.lab.local", "ApiTokenFile": "secrets/fa01.token", "Platform": "auto", "Tls": "skip" },
+		{ "Name": "fb01", "Endpoint": "fb01.lab.local", "ApiTokenFile": "secrets/fb01.token", "Platform": "auto", "Tls": "skip" }
+	],
+
+	// Every share of the job, exactly as it appears in the Veeam inventory.
+	//   SMB: \\\\server\\share   NFS: server:/export
+	// Source "auto" maps the share to its FlashArray managed directory (via directory exports)
+	// or FlashBlade file system. Set it explicitly only when the automatic mapping is ambiguous:
+	// FlashArray "filesystem:directory", FlashBlade the file system name.
+	"Shares": [
+		{ "VeeamPath": "\\\\192.0.2.10\\finance-smb",   "Array": "fa01", "Source": "auto" },
+		{ "VeeamPath": "192.0.2.10:/finance-nfs",       "Array": "fa01", "Source": "auto" },
+		{ "VeeamPath": "\\\\192.0.2.20\\projects-smb", "Array": "fb01", "Source": "auto" },
+		{ "VeeamPath": "192.0.2.20:/projects-nfs",   "Array": "fb01", "Source": "auto" }
+	],
+
+	"Snapshot": {
+		// Tag in every snapshot name. Letters, digits and '-', 1 to 40 characters.
+		// FlashArray renders <dir>.<Tag>.<timestamp>, share path .snapshot/<Tag>.<timestamp>
+		// FlashBlade renders <fs>.<Tag>-<timestamp>, share path .snapshot/<fs>.<Tag>-<timestamp>
+		// The timestamp is UTC, e.g. 20261020T081500Z. The post phase and the sweep recognise
+		// snapshots by this tag, so give every job its own tag if jobs share a source.
+		"Tag": "Veeam-Backup",
+
+		// FlashArray only: backstop expiry (keep_for) in case the post phase never runs.
+		// '7d', '48h', '6h30m', ... between 5m and 365d, or 'none'. FlashBlade has no
+		// per-snapshot expiry; its leftovers are removed by the sweep below.
+		"Lifetime": "7d",
+
+		// Pre phase: destroy snapshots with this tag that are older than this. 'none' disables.
+		// Keep it well above the longest job runtime when two jobs share a source.
+		"SweepOlderThan": "2d",
+
+		// Where the arrays expose snapshots inside a share. Rarely anything else.
+		"SnapshotRootDirName": ".snapshot"
+	},
+
+	"Behaviour": {
+		// On a pre-phase failure, point every resolved share at a non-existent snapshot path with
+		// failover off, so the job fails instead of backing up stale or live data. Veeam only
+		// warns when a pre-job script fails. Turn off only if you watch for those warnings.
+		"FailSafePath": true,
+
+		// Also set the share's processing mode to "backup from storage snapshot at this path".
+		// Required for the path (and the fail-safe) to have any effect; leave it on.
+		"EnsureProcessingMode": true,
+
+		// Post phase: exit non-zero when nothing matched the tag. Off: nothing to clean up is normal.
+		"FailIfNoSnapshots": false,
+
+		// Post phase: keep snapshots younger than this (another job may be reading them). 'none'
+		// destroys every snapshot carrying the tag.
+		"PostKeepYoungerThan": "none"
+	},
+
+	"Logging": {
+		// Default: <install>\log on Windows, /var/lib/veeam/scripts/sandbox/everpure-veeam-nas/log
+		// on the appliance.
+		// "Directory": "log",
+		"RetentionDays": 30
+	}
+}

@@ -291,16 +291,16 @@ Export-ModuleMember -Function Connect-VBRServer, Disconnect-VBRServer, Get-VBRSe
 	ConvertTo-SecureString 'vbr-secret' -AsPlainText -Force | Export-Clixml -Path $vbrPassword
 	$r = Invoke-ScriptUnderTest 'fa-file-veeam-snapshot-pre-backup.ps1' @(
 		'-ConfigFile', $smbConfig,
-		'-VBRUser', 'CXC-VEEAM-VBR\veeam-automation', '-VBRPasswordFile', $vbrPassword,
+		'-VBRUser', 'VBR01\veeam-automation', '-VBRPasswordFile', $vbrPassword,
 		'-ForceAcceptTlsCertificate')
 	Assert-Equal 'exit code' $r.ExitCode 0
 	$connect = Get-Call $r 'Connect-VBRServer'
 	Assert-Equal 'credential was passed'      $connect.Data.HasCredential 'True'
-	Assert-Equal 'user name reached Veeam'    $connect.Data.UserName 'CXC-VEEAM-VBR\veeam-automation'
+	Assert-Equal 'user name reached Veeam'    $connect.Data.UserName 'VBR01\veeam-automation'
 	Assert-Equal 'password was decrypted'     $connect.Data.Password 'vbr-secret'
 	Assert-Equal 'TLS override was passed'    $connect.Data.ForceTls 'True'
 	Assert-Equal 'preflight reports the target' ([bool]($r.Output -match 'Veeam connection preflight')) 'True'
-	Assert-Equal 'preflight names the credential' ([bool]($r.Output -match "explicit credential 'CXC-VEEAM-VBR\\veeam-automation'")) 'True'
+	Assert-Equal 'preflight names the credential' ([bool]($r.Output -match "explicit credential 'VBR01\\veeam-automation'")) 'True'
 	Assert-Equal 'Veeam password absent from output' ([bool]($r.Output -match 'vbr-secret')) 'False'
 
 	$r = Invoke-ScriptUnderTest 'fa-file-veeam-snapshot-pre-backup.ps1' @('-ConfigFile', $smbConfig)

@@ -1,0 +1,508 @@
+# Copyright 2026 Everpure, Inc.
+# SPDX-License-Identifier: Apache-2.0
+
+<#
+	Common layer: platform facts, environment fix-ups, configuration loading and validation,
+	duration parsing, share path parsing and snapshot naming.
+
+	Nothing in here talks to Veeam or to an array. Everything is pure and therefore testable on
+	any machine with PowerShell 7.
+#>
+
+#region Platform
+
+function Get-EvpPlatform {
+	<#
+	.SYNOPSIS
+		Returns the facts about the host that decide platform defaults.
+	.DESCRIPTION
+		The only place that inspects the operating system. Everything else asks this object, so
+		the Windows/Linux differences stay in one spot: install and log locations, how secrets
+		are protected, whether 'localhost' may be used for Veeam, and whether HOME needs fixing.
+	#>
+	[CmdletBinding()]
+	[OutputType([psobject])]
+	param()
+
+	$onWindows = [bool]($IsWindows -or $env:OS -eq 'Windows_NT')
+	$onLinux = [bool]$IsLinux
+
+	$identity = 'unknown'
+	try {
+		if ($onWindows) {
+			$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+		} else {
+			$identity = [System.Environment]::UserName
+			if ([string]::IsNullOrWhiteSpace($identity)) { $identity = "uid $(& id -u 2>$null)" }
+		}
+	} catch {
+		Write-Verbose "Could not determine the current identity: $($_.Exception.Message)"
+	}
+
+	$interactive = $true
+	try { $interactive = [Environment]::UserInteractive } catch {
+		Write-Verbose 'Could not determine whether this session is interactive.'
+	}
+
+	# The Veeam Software Appliance runs job scripts in a sandbox whose only persistent writable
+	# location is this directory. Everything else under /var/lib/veeam/scripts is read-only.
+	$sandboxRoot = '/var/lib/veeam/scripts/sandbox'
+
+	[pscustomobject]@{
+		IsWindows    = $onWindows
+		IsLinux      = $onLinux
+		Name         = if ($onWindows) { 'Windows' } elseif ($onLinux) { 'Linux' } else { 'Other' }
+		Identity     = $identity
+		Interactive  = $interactive
+		HomeIsEmpty  = [string]::IsNullOrEmpty($env:HOME)
+		SandboxRoot  = $sandboxRoot
+		InSandbox    = [bool]($onLinux -and (Test-Path -LiteralPath $sandboxRoot -PathType Container))
+	}
+}
+
+function Initialize-EvpEnvironment {
+	<#
+	.SYNOPSIS
+		Applies the environment fix-ups a job script needs before its first HTTPS call.
+	.DESCRIPTION
+		On Linux .NET opens the per-user certificate store under $HOME while building a
+		certificate chain, even when validation is skipped. The appliance sandbox starts scripts
+		with HOME unset, so every TLS handshake fails with "the home directory of the current
+		user could not be determined". Setting HOME to any writable directory fixes it. Confirmed
+		in real job runs on the appliance (see docs/unified-nas-snapshot-plan.md, R11).
+	.PARAMETER Platform
+		From Get-EvpPlatform.
+	.PARAMETER WritableDirectory
+		Directory to point HOME at when it is empty. Typically the log directory.
+	#>
+	[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+		Justification = 'Changes only this process environment, and -WhatIf must not disable TLS for the dry run it is describing.')]
+	[CmdletBinding()]
+	param(
+		[Parameter(Mandatory)] $Platform,
+		[string] $WritableDirectory
+	)
+
+	if ($Platform.IsLinux -and $Platform.HomeIsEmpty) {
+		$target = $WritableDirectory
+		if (-not $target -or -not (Test-Path -LiteralPath $target -PathType Container)) { $target = '/tmp' }
+		$env:HOME = $target
+		Write-Host "HOME was empty; set to '$target' so that .NET can complete TLS handshakes."
+	}
+}
+
+#endregion
+
+#region Configuration
+
+function Read-EvpJsonFile {
+	<# Reads a JSON file that may contain // and /* */ comments. Private helper. #>
+	[CmdletBinding()]
+	param([Parameter(Mandatory)] [string] $Path)
+
+	try {
+		$raw = Get-Content -LiteralPath $Path -Raw -ErrorAction Stop
+		return ($raw | ConvertFrom-Json -Depth 16 -ErrorAction Stop)
+	} catch {
+		throw "Configuration file '$Path' could not be read as JSON: $($_.Exception.Message)"
+	}
+}
+
+function Get-EvpProperty {
+	<# Returns a property of a PSCustomObject or $null when absent. Private helper. #>
+	param($Object, [string] $Name)
+	if ($null -eq $Object) { return $null }
+	if ($Object -is [System.Collections.IDictionary]) { if ($Object.Contains($Name)) { return $Object[$Name] } else { return $null } }
+	if ($Object.PSObject.Properties.Name -contains $Name) { return $Object.$Name }
+	return $null
+}
+
+function Resolve-EvpConfigPath {
+	<# Resolves a possibly relative path against the configuration file directory. #>
+	param([string] $Value, [string] $BaseDirectory)
+	if ([string]::IsNullOrWhiteSpace($Value)) { return $null }
+	if ([System.IO.Path]::IsPathRooted($Value)) { return $Value }
+	return [System.IO.Path]::GetFullPath((Join-Path $BaseDirectory $Value))
+}
+
+function Get-EvpConfig {
+	<#
+	.SYNOPSIS
+		Loads, validates and normalises a configuration file.
+	.DESCRIPTION
+		Returns an ordered hashtable with every setting present and defaulted, so the rest of
+		the code never has to test for missing keys. Relative file paths resolve against the
+		directory holding the configuration file, which works identically on both platforms.
+		Validation is deliberately strict: a misconfiguration must fail at verify time, not at
+		02:00 in a job.
+	.PARAMETER Path
+		Path to the JSON (with comments) configuration file.
+	.OUTPUTS
+		Ordered hashtable with the sections Veeam, Arrays, Shares, Snapshot, Behaviour, Logging
+		and the meta keys ConfigPath, ConfigDirectory and ProfileName.
+	#>
+	[CmdletBinding()]
+	[OutputType([System.Collections.Specialized.OrderedDictionary])]
+	param([Parameter(Mandatory)] [string] $Path)
+
+	$fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+	if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
+		throw "Configuration file '$fullPath' was not found."
+	}
+	$raw = Read-EvpJsonFile -Path $fullPath
+	$baseDir = Split-Path -Parent $fullPath
+	$problems = [System.Collections.Generic.List[string]]::new()
+
+	# --- Veeam -------------------------------------------------------------------------------
+	$v = Get-EvpProperty $raw 'Veeam'
+	$backend = [string](Get-EvpProperty $v 'Backend')
+	if (-not $backend) { $backend = 'auto' }
+	if ($backend -notin @('auto', 'PowerShell', 'Rest')) { $problems.Add("Veeam.Backend must be 'auto', 'PowerShell' or 'Rest' (got '$backend').") }
+	$tls = [string](Get-EvpProperty $v 'Tls')
+	if (-not $tls) { $tls = 'skip' }
+	if ($tls -notmatch '^(skip|system|thumbprint:[0-9A-Fa-f]{40,64})$') { $problems.Add("Veeam.Tls must be 'skip', 'system' or 'thumbprint:<hex>' (got '$tls').") }
+	$veeamUser = [string](Get-EvpProperty $v 'User')
+	$veeamPasswordFile = Resolve-EvpConfigPath -Value ([string](Get-EvpProperty $v 'PasswordFile')) -BaseDirectory $baseDir
+	if ([bool]$veeamUser -xor [bool]$veeamPasswordFile) { $problems.Add('Veeam.User and Veeam.PasswordFile must be set together or not at all.') }
+	$port = Get-EvpProperty $v 'Port'
+	$force = Get-EvpProperty $v 'ForceAcceptTlsCertificate'
+	$ack = Get-EvpProperty $v 'AcknowledgeRestDefect'
+	$veeam = [ordered]@{
+		Backend                   = $backend
+		Server                    = if (Get-EvpProperty $v 'Server') { [string](Get-EvpProperty $v 'Server') } else { 'localhost' }
+		Port                      = if ($null -ne $port) { [int]$port } else { 9419 }
+		User                      = $veeamUser
+		PasswordFile              = $veeamPasswordFile
+		Tls                       = $tls
+		ForceAcceptTlsCertificate = if ($null -ne $force) { [bool]$force } else { $true }
+		ApiVersion                = if (Get-EvpProperty $v 'ApiVersion') { [string](Get-EvpProperty $v 'ApiVersion') } else { '1.3-rev2' }
+		AcknowledgeRestDefect     = if ($null -ne $ack) { [bool]$ack } else { $false }
+	}
+
+	# --- Arrays ------------------------------------------------------------------------------
+	$arrays = [ordered]@{}
+	$rawArrays = @(Get-EvpProperty $raw 'Arrays' | Where-Object { $null -ne $_ })
+	if ($rawArrays.Count -eq 0) { $problems.Add('Arrays must list at least one array.') }
+	$index = 0
+	foreach ($a in $rawArrays) {
+		$index++
+		$name = [string](Get-EvpProperty $a 'Name')
+		if (-not $name) { $problems.Add("Arrays[$index] has no Name."); continue }
+		if ($arrays.Contains($name)) { $problems.Add("Arrays: the name '$name' is used more than once."); continue }
+		$platform = [string](Get-EvpProperty $a 'Platform')
+		if (-not $platform) { $platform = 'auto' }
+		if ($platform -notin @('auto', 'FlashArray', 'FlashBlade')) { $problems.Add("Arrays['$name'].Platform must be 'auto', 'FlashArray' or 'FlashBlade'.") }
+		$aTls = [string](Get-EvpProperty $a 'Tls')
+		if (-not $aTls) { $aTls = 'skip' }
+		if ($aTls -notmatch '^(skip|system|thumbprint:[0-9A-Fa-f]{40,64})$') { $problems.Add("Arrays['$name'].Tls must be 'skip', 'system' or 'thumbprint:<hex>'.") }
+		$endpoint = [string](Get-EvpProperty $a 'Endpoint')
+		if (-not $endpoint) { $problems.Add("Arrays['$name'] has no Endpoint.") }
+		$tokenFile = Resolve-EvpConfigPath -Value ([string](Get-EvpProperty $a 'ApiTokenFile')) -BaseDirectory $baseDir
+		if (-not $tokenFile) { $problems.Add("Arrays['$name'] has no ApiTokenFile.") }
+		$arrays[$name] = [ordered]@{
+			Name         = $name
+			Endpoint     = $endpoint
+			ApiTokenFile = $tokenFile
+			Platform     = $platform
+			Tls          = $aTls
+		}
+	}
+
+	# --- Shares ------------------------------------------------------------------------------
+	$shares = [System.Collections.Generic.List[object]]::new()
+	$rawShares = @(Get-EvpProperty $raw 'Shares' | Where-Object { $null -ne $_ })
+	if ($rawShares.Count -eq 0) { $problems.Add('Shares must list at least one share.') }
+	$index = 0
+	$seenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+	foreach ($s in $rawShares) {
+		$index++
+		$veeamPath = [string](Get-EvpProperty $s 'VeeamPath')
+		if (-not $veeamPath) { $problems.Add("Shares[$index] has no VeeamPath."); continue }
+		$protocol = Get-EvpShareProtocol -VeeamPath $veeamPath
+		if (-not $protocol) { $problems.Add("Shares[$index]: '$veeamPath' is neither an SMB path (\\server\share) nor an NFS path (server:/export)."); continue }
+		if (-not $seenPaths.Add((Get-EvpNormalizedSharePath -VeeamPath $veeamPath))) { $problems.Add("Shares: '$veeamPath' is listed more than once."); continue }
+		$arrayName = [string](Get-EvpProperty $s 'Array')
+		if (-not $arrayName) { $problems.Add("Shares[$index] ('$veeamPath') has no Array.") }
+		elseif (-not $arrays.Contains($arrayName)) { $problems.Add("Shares[$index] ('$veeamPath') references unknown array '$arrayName'.") }
+		$source = [string](Get-EvpProperty $s 'Source')
+		if (-not $source) { $source = 'auto' }
+		$parts = Split-EvpSharePath -VeeamPath $veeamPath
+		$shares.Add([ordered]@{
+				VeeamPath = $veeamPath
+				Protocol  = $protocol
+				Server    = $parts.Server
+				ShareName = $parts.ShareName
+				Array     = $arrayName
+				Source    = $source
+			})
+	}
+
+	# --- Snapshot ----------------------------------------------------------------------------
+	$sn = Get-EvpProperty $raw 'Snapshot'
+	$tag = [string](Get-EvpProperty $sn 'Tag')
+	if (-not $tag) { $tag = 'Veeam-Backup' }
+	if ($tag -notmatch '^[A-Za-z0-9-]{1,40}$' -or $tag -notmatch '[A-Za-z]' -or $tag -match '^-|-$') {
+		$problems.Add("Snapshot.Tag '$tag' is invalid: 1 to 40 letters, digits and '-', at least one letter, not starting or ending with '-'. Both arrays enforce this character set.")
+	}
+	$lifetime = [string](Get-EvpProperty $sn 'Lifetime')
+	if (-not $lifetime) { $lifetime = '7d' }
+	$lifetimeMs = 0L
+	try { $lifetimeMs = ConvertTo-EvpMilliseconds -Duration $lifetime -MinimumMs 300000 -MaximumMs 31536000000 } catch { $problems.Add("Snapshot.Lifetime: $($_.Exception.Message)") }
+	$sweep = Get-EvpProperty $sn 'SweepOlderThan'
+	$sweepText = if ($null -eq $sweep) { '2d' } else { [string]$sweep }
+	$sweepMs = 0L
+	try { $sweepMs = ConvertTo-EvpMilliseconds -Duration $sweepText } catch { $problems.Add("Snapshot.SweepOlderThan: $($_.Exception.Message)") }
+	$root = [string](Get-EvpProperty $sn 'SnapshotRootDirName')
+	if (-not $root) { $root = '.snapshot' }
+	$snapshot = [ordered]@{
+		Tag                 = $tag
+		Lifetime            = $lifetime
+		LifetimeMs          = $lifetimeMs
+		SweepOlderThan      = $sweepText
+		SweepOlderThanMs    = $sweepMs
+		SnapshotRootDirName = $root
+		MatchPattern        = Get-EvpSnapshotMatchPattern -Tag $tag
+	}
+
+	# --- Behaviour ---------------------------------------------------------------------------
+	$b = Get-EvpProperty $raw 'Behaviour'
+	$failSafe = Get-EvpProperty $b 'FailSafePath'
+	$ensureMode = Get-EvpProperty $b 'EnsureProcessingMode'
+	$failIfNone = Get-EvpProperty $b 'FailIfNoSnapshots'
+	$keepYounger = Get-EvpProperty $b 'PostKeepYoungerThan'
+	$keepYoungerText = if ($null -eq $keepYounger) { 'none' } else { [string]$keepYounger }
+	$keepYoungerMs = 0L
+	try { $keepYoungerMs = ConvertTo-EvpMilliseconds -Duration $keepYoungerText } catch { $problems.Add("Behaviour.PostKeepYoungerThan: $($_.Exception.Message)") }
+	$behaviour = [ordered]@{
+		FailSafePath         = if ($null -ne $failSafe) { [bool]$failSafe } else { $true }
+		EnsureProcessingMode = if ($null -ne $ensureMode) { [bool]$ensureMode } else { $true }
+		FailIfNoSnapshots    = if ($null -ne $failIfNone) { [bool]$failIfNone } else { $false }
+		PostKeepYoungerThan  = $keepYoungerText
+		PostKeepYoungerThanMs = $keepYoungerMs
+	}
+
+	# --- Logging -----------------------------------------------------------------------------
+	$l = Get-EvpProperty $raw 'Logging'
+	$retention = Get-EvpProperty $l 'RetentionDays'
+	$logging = [ordered]@{
+		Directory     = Resolve-EvpConfigPath -Value ([string](Get-EvpProperty $l 'Directory')) -BaseDirectory $baseDir
+		RetentionDays = if ($null -ne $retention) { [int]$retention } else { 30 }
+	}
+
+	if ($problems.Count -gt 0) {
+		throw ("Configuration file '$fullPath' is invalid:`n  - " + ($problems -join "`n  - "))
+	}
+
+	return [ordered]@{
+		ConfigPath      = $fullPath
+		ConfigDirectory = $baseDir
+		ProfileName     = [System.IO.Path]::GetFileNameWithoutExtension($fullPath)
+		Veeam           = $veeam
+		Arrays          = $arrays
+		Shares          = $shares
+		Snapshot        = $snapshot
+		Behaviour       = $behaviour
+		Logging         = $logging
+	}
+}
+
+#endregion
+
+#region Durations
+
+function ConvertTo-EvpMilliseconds {
+	<#
+	.SYNOPSIS
+		Converts a compact duration such as '7d', '48h' or '6h30m' into milliseconds.
+	.DESCRIPTION
+		Units, combinable in descending order: w, d, h, m, s. 'none', 'never', 'off', '0' and an
+		empty value mean "no duration" and return 0. A bare number is rejected because its unit
+		would be anyone's guess. Optional bounds exist for FlashArray keep_for, which the array
+		accepts between 5 minutes and 365 days.
+	#>
+	[CmdletBinding()]
+	[OutputType([long])]
+	param(
+		[AllowNull()] [AllowEmptyString()] [string] $Duration,
+		[long] $MinimumMs = 0,
+		[long] $MaximumMs = 0
+	)
+
+	if ([string]::IsNullOrWhiteSpace($Duration)) { return 0L }
+	$text = $Duration.Trim()
+	if ($text -in @('0', 'none', 'never', 'off', 'unlimited')) { return 0L }
+	if ($text -match '^\d+$') {
+		throw "Duration '$text' has no unit. Use a form such as '7d', '48h', '1d12h', '6h30m' or '90m', or 'none'."
+	}
+	$pattern = '^(?:(?<w>\d+)w)?(?:(?<d>\d+)d)?(?:(?<h>\d+)h)?(?:(?<m>\d+)m)?(?:(?<s>\d+)s)?$'
+	$parsed = [regex]::Match($text, $pattern, [System.Text.RegularExpressions.RegexOptions]::IgnoreCase)
+	if (-not $parsed.Success -or [string]::IsNullOrEmpty($parsed.Value)) {
+		throw "Could not parse duration '$Duration'. Use units w, d, h, m and s in descending order, or 'none'."
+	}
+	$factors = @{ w = 604800000L; d = 86400000L; h = 3600000L; m = 60000L; s = 1000L }
+	$total = 0L
+	foreach ($unit in 'w', 'd', 'h', 'm', 's') {
+		$group = $parsed.Groups[$unit]
+		if ($group.Success) { $total += ([long]$group.Value) * $factors[$unit] }
+	}
+	if ($total -eq 0) { return 0L }
+	if (($MinimumMs -gt 0 -and $total -lt $MinimumMs) -or ($MaximumMs -gt 0 -and $total -gt $MaximumMs)) {
+		throw "Duration '$Duration' resolves to $total ms, outside the accepted range ($MinimumMs to $MaximumMs ms)."
+	}
+	return $total
+}
+
+#endregion
+
+#region Share paths
+
+function Get-EvpShareProtocol {
+	<# Returns 'SMB' for \\server\share, 'NFS' for server:/export, otherwise $null. #>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param([Parameter(Mandatory)] [string] $VeeamPath)
+
+	if ($VeeamPath -match '^\\\\[^\\]+\\[^\\]+') { return 'SMB' }
+	if ($VeeamPath -match '^[^\\/:\s]+:/.+') { return 'NFS' }
+	return $null
+}
+
+function Split-EvpSharePath {
+	<#
+	.SYNOPSIS
+		Splits a Veeam share path into server and share (or export) name.
+	.DESCRIPTION
+		'\\192.0.2.10\finance-smb' -> Server 192.0.2.10, ShareName finance-smb.
+		'192.0.2.21:/projects-nfs' -> Server 192.0.2.21, ShareName projects-nfs.
+		An NFS export path may contain further path segments; they are kept in ShareName.
+	#>
+	[CmdletBinding()]
+	[OutputType([psobject])]
+	param([Parameter(Mandatory)] [string] $VeeamPath)
+
+	$trimmed = $VeeamPath.TrimEnd('\', '/')
+	if ($trimmed -match '^\\\\([^\\]+)\\(.+)$') {
+		return [pscustomobject]@{ Protocol = 'SMB'; Server = $Matches[1]; ShareName = $Matches[2] }
+	}
+	if ($trimmed -match '^([^\\/:\s]+):/(.*)$') {
+		return [pscustomobject]@{ Protocol = 'NFS'; Server = $Matches[1]; ShareName = $Matches[2] }
+	}
+	throw "'$VeeamPath' is neither an SMB path (\\server\share) nor an NFS path (server:/export)."
+}
+
+function Get-EvpNormalizedSharePath {
+	<# Canonical form for comparing share paths: lower case, trailing separators removed. #>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param([Parameter(Mandatory)] [string] $VeeamPath)
+	return $VeeamPath.Trim().TrimEnd('\', '/').ToLowerInvariant()
+}
+
+function Get-EvpStorageSnapshotPath {
+	<#
+	.SYNOPSIS
+		Builds the storage snapshot path Veeam reads from, in the share's own separator style.
+	.DESCRIPTION
+		SMB: \\server\share\.snapshot\<name>    NFS: server:/export/.snapshot/<name>
+	#>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param(
+		[Parameter(Mandatory)] [string] $VeeamPath,
+		[Parameter(Mandatory)] [string] $SnapshotDirectoryName,
+		[string] $SnapshotRootDirName = '.snapshot'
+	)
+	$protocol = Get-EvpShareProtocol -VeeamPath $VeeamPath
+	$separator = if ($protocol -eq 'SMB') { '\' } else { '/' }
+	return '{0}{1}{2}{1}{3}' -f $VeeamPath.TrimEnd('\', '/'), $separator, $SnapshotRootDirName, $SnapshotDirectoryName
+}
+
+#endregion
+
+#region Snapshot naming
+
+function Get-EvpTimestamp {
+	<# UTC timestamp in ISO 8601 basic form, valid as a snapshot suffix on both arrays. #>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param([datetime] $Time = [datetime]::UtcNow)
+	return $Time.ToUniversalTime().ToString('yyyyMMdd\THHmmss\Z')
+}
+
+function New-EvpSnapshotName {
+	<#
+	.SYNOPSIS
+		Renders the snapshot name for one platform from the tag and a timestamp.
+	.DESCRIPTION
+		FlashArray takes client_name and suffix separately and renders '<dir>.<client>.<suffix>';
+		the directory visible under .snapshot is '<client>.<suffix>'. FlashBlade takes a single
+		suffix and renders '<fs>.<suffix>'; the directory under .snapshot is that full name.
+		FlashBlade rejects dots in the suffix, so there the tag and timestamp are joined by '-'.
+		See docs/unified-nas-snapshot-plan.md section 5a.
+	.PARAMETER SourceName
+		FlashBlade file system name (needed for its directory name). Ignored for FlashArray.
+	#>
+	[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+		Justification = 'Builds a name; changes nothing.')]
+	[CmdletBinding()]
+	[OutputType([psobject])]
+	param(
+		[Parameter(Mandatory)] [string] $Tag,
+		[Parameter(Mandatory)] [ValidateSet('FlashArray', 'FlashBlade')] [string] $Platform,
+		[string] $SourceName,
+		[string] $Timestamp = (Get-EvpTimestamp)
+	)
+
+	if ($Platform -eq 'FlashArray') {
+		return [pscustomobject]@{
+			Platform      = $Platform
+			Timestamp     = $Timestamp
+			ClientName    = $Tag
+			Suffix        = $Timestamp
+			DirectoryName = '{0}.{1}' -f $Tag, $Timestamp
+			ArrayName     = if ($SourceName) { '{0}.{1}.{2}' -f $SourceName, $Tag, $Timestamp } else { $null }
+		}
+	}
+	$suffix = '{0}-{1}' -f $Tag, $Timestamp
+	return [pscustomobject]@{
+		Platform      = $Platform
+		Timestamp     = $Timestamp
+		ClientName    = $null
+		Suffix        = $suffix
+		DirectoryName = if ($SourceName) { '{0}.{1}' -f $SourceName, $suffix } else { $suffix }
+		ArrayName     = if ($SourceName) { '{0}.{1}' -f $SourceName, $suffix } else { $null }
+	}
+}
+
+function Get-EvpSnapshotMatchPattern {
+	<# Regex recognising snapshots created with this tag on either platform. #>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param([Parameter(Mandatory)] [string] $Tag)
+	return '(^|\.){0}[.-](\d{{8}}T\d{{6}}Z)$' -f [regex]::Escape($Tag)
+}
+
+function Get-EvpSnapshotTimestamp {
+	<# Extracts the UTC creation time encoded in a snapshot name, or $null when it does not match. #>
+	[CmdletBinding()]
+	[OutputType([Nullable[datetime]])]
+	param(
+		[Parameter(Mandatory)] [string] $Name,
+		[Parameter(Mandatory)] [string] $Tag
+	)
+	$m = [regex]::Match($Name, (Get-EvpSnapshotMatchPattern -Tag $Tag))
+	if (-not $m.Success) { return $null }
+	try {
+		return [datetime]::ParseExact($m.Groups[2].Value, 'yyyyMMdd\THHmmss\Z', [cultureinfo]::InvariantCulture, [System.Globalization.DateTimeStyles]::AssumeUniversal -bor [System.Globalization.DateTimeStyles]::AdjustToUniversal)
+	} catch { return $null }
+}
+
+function Get-EvpSentinelDirectoryName {
+	<# Deliberately non-existent snapshot directory used by the fail-safe. #>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param([string] $Timestamp = (Get-EvpTimestamp))
+	return '__everpure-pre-backup-failed-{0}__' -f $Timestamp
+}
+
+#endregion
