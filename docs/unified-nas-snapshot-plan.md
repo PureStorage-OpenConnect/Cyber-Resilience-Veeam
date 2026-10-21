@@ -1,7 +1,8 @@
 # Unified Everpure NAS backup-from-snapshot scripts for Veeam: plan
 
-Status: draft, 2026-10-16. Supersedes the separate `flasharray-veeam-nas-snapshots/` and the
-never-committed `flashblade-veeam-nas-snapshots/` work.
+Status: Windows backup server released, appliance blocked by Veeam (see section 4). Supersedes
+the earlier FlashArray-only scripts, removed from the repository on 2026-10-21 and kept in the
+git history.
 
 ## 1. Requirements
 
@@ -103,11 +104,32 @@ closed by the probe runs on 2026-10-16.
 | T7 | Share-to-source lookup | FA `directory-exports` and FB `file-systems` resolve the lab shares | done: FA via `directory-exports` + policy type, FB via file-system name (`nfs.export_name` and `smb.share_name` empty means "same as file system") |
 | T8 | REST API version matrix | which `x-api-version` each target accepts for these endpoints | open, depends on Q1 |
 | T9 | Two jobs on one source at the same second | no name collision or defined conflict handling | open |
-| T10 | Post-script after a cancelled job and after retries | runs once, destroys the right snapshots, RC 0 | open |
+| T10 | Post-script after a cancelled job and after retries | runs once, destroys the right snapshots, RC 0 | **done 2026-10-21** on the Windows dev job: retries pass (one pre, one post after the last retry, 5 destroyed, RC 0); a job stopped by the operator never runs the post-script (see findings) |
 | T11 | Stdout capture and size on Windows job logs | output visible; nothing truncated at the sizes we emit | open |
 | T12 | Real HTTPS transport with every TLS policy (skip, SHA-1/SHA-256 pin, system) on both platforms | local TLS server test green on macOS and Windows | done 2026-10-20 (`tests/Test-EvpHttp.ps1`); found that PowerShell TLS callbacks fail off-runspace on Windows, fixed with .NET validators |
 | T13 | `verify` phase on the Windows dev job as SYSTEM | six shares resolved through the PowerShell backend, both arrays reached | done 2026-10-20: passes end to end with DPAPI-stored tokens |
 | T14 | Real pre/job/post chain on the Windows dev job | all six shares back up from snapshots; post destroys exactly the run's snapshots | **done 2026-10-20 16:25**: pre exit 0 (5 snapshots, 6 repoints), job Success on 6 shares, post destroyed 5, exit 0 |
+
+**Findings from T10 (2026-10-21, Windows dev job, Veeam 13.1.1.18):**
+
+* **Retries.** Scheduled run with a sentinel share that cannot succeed (StorageSnapshot mode,
+  non-existent path, failover off) and retry set to 1 attempt after 1 minute. First session:
+  pre-job script ran once, five snapshots, six Pure shares Success, sentinel Failed; Veeam logged
+  "Session result is Failed. Checking if it is last retry" and did **not** run the post-job
+  script. Retry session (job mode `Retry`, only the failed share): **no pre-job script**, then the
+  post-job script ran once, destroyed exactly the five snapshots, exit 0. So a share that fails
+  in the first attempt is retried against the snapshot the first attempt created, which still
+  exists at that point. Pass criterion met. Veeam only retries scheduled runs; a job started by
+  hand gets no automatic retry, and the post-job script then runs after that single session.
+* **Cancelled job.** Job stopped with `Stop-VBRJob` during data transfer: Veeam logs "Running
+  post-job script" and immediately after "Error running post-job. File not found: pwsh.exe" with
+  a `TerminatedException ... ThrowIfStopped` stack. The message is misleading; the post-job script
+  is simply not started for a session the operator stopped. The five snapshots of that run stayed
+  on the arrays and the shares stayed pointed at them. Running the post phase by hand afterwards
+  (as SYSTEM) destroyed exactly those five, exit 0; without that, the next pre-job sweep (2 days)
+  or the FlashArray `keep_for` (7 days) removes them. Documented in the README.
+* `Stop-VBRJob` without `-RunAsync` blocked for about 2.5 minutes until the running tasks had
+  drained; the pre-job script was not interrupted because it had already finished.
 
 **Findings from T1 and T3 (2026-10-16, run inside the emulated sandbox on the VSA):**
 
@@ -189,7 +211,7 @@ closed by the probe runs on 2026-10-16.
   and the script then ran into Veeam's 15-minute timeout; with an explicit local user
   (`veeam-automation`, member of Administrators) every later run connected in about 9 s and
   the pre-job script finished with exit code 0. The Windows adapter therefore keeps the
-  explicit-credential path from `PureVeeamFA.psm1` as an option and must fail fast, never
+  explicit-credential path from the earlier FlashArray scripts as an option and must fail fast, never
   hang, when the implicit connection is refused. Veeam also logs
   "[ScriptExecution] Failed to get working directory" for every script run; harmless, but the
   script must not rely on the working directory (R10 applies on Windows too).
@@ -344,14 +366,14 @@ snapshots are cleaned up manually if needed.
 
 | Phase | Deliverable | Done when | Status |
 | --- | --- | --- | --- |
-| 0 | Lab tests T1 to T11, answers to the open questions | every row in section 4 has a result | T0 to T7 done; T8 to T11 open |
+| 0 | Lab tests T1 to T11, answers to the open questions | every row in section 4 has a result | T0 to T7, T10, T12 to T14 done; T8, T9, T11 open |
 | 1 | Skeleton: config loader, platform adapter, logging, exit codes, secret helper; CI on Windows and Linux with PSScriptAnalyzer | `verify` phase runs on both platforms against mocked REST | **done 2026-10-20** (`everpure-veeam-nas-snapshots/`, 246 mocked tests green on macOS) |
 | 2 | Veeam REST client | T1 and T2 pass with the real client; mocked tests for SMB/NFS, miss, duplicate, PUT round-trip | code done 2026-10-20 (PowerShell + REST backends, mocked); REST gated by build check pending Veeam fix |
 | 3 | Pure REST client with FA and FB adapters | T3 passes on both arrays; naming and path tests mocked | code done 2026-10-20 (mocked); real-array run pending tokens on the Windows server |
-| 4 | Orchestration: pre, post, fail-safe, sweep, multi-share | dev job backs up from snapshot on the VSA and on a Windows VBR; T6, T9, T10 pass | **Windows: done 2026-10-20** (T14); VSA waits for the Veeam REST fix; T9, T10 open |
-| 5 | Wrapper generator, credential helper `-Verify`, documentation, deprecation note on the old folders | a reader can install from the README alone on either platform | generator, helper and README written 2026-10-20; deprecation note open |
+| 4 | Orchestration: pre, post, fail-safe, sweep, multi-share | dev job backs up from snapshot on the VSA and on a Windows VBR; T6, T9, T10 pass | **Windows: done 2026-10-20** (T14), T10 done 2026-10-21; VSA waits for the Veeam REST fix; T9 open |
+| 5 | Wrapper generator, credential helper `-Verify`, documentation, removal of the old folders | a reader can install from the README alone on either platform | generator, helper and README written 2026-10-20; old FlashArray folder removed 2026-10-21 (history only) |
 
-Port, do not rewrite, from `PureVeeamFA.psm1`: settings precedence, duration parsing, DPAPI
+Ported, not rewritten, from the earlier FlashArray scripts (git history): settings precedence, duration parsing, DPAPI
 handling, transcript naming and pruning, the fail-safe rationale, and the test harness approach
 (stubbed calls recorded to JSON lines, assertions on exactly which calls happened).
 

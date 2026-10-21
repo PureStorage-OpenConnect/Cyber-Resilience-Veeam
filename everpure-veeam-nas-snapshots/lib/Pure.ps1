@@ -266,8 +266,8 @@ function Remove-EvpArraySnapshots {
 	$summary = [pscustomobject]@{ Destroyed = 0; AlreadyDestroyed = 0; Failed = 0 }
 	foreach ($s in $Snapshots) {
 		if ($s.Destroyed) { Write-Host "Snapshot '$($s.Name)' was already destroyed."; $summary.AlreadyDestroyed++; continue }
-		Write-Host "Destroying snapshot '$($s.Name)'..."
 		if ($PSCmdlet.ShouldProcess($s.Name, "PATCH $path destroyed=true")) {
+			Write-Host "Destroying snapshot '$($s.Name)'..."
 			try {
 				Invoke-EvpArrayApi -Session $Session -Method PATCH -Path $path -Query @{ names = $s.Name } -Body @{ destroyed = $true } | Out-Null
 				$summary.Destroyed++

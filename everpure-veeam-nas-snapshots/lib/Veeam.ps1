@@ -6,7 +6,7 @@
 
 	  PowerShell  Veeam.Backup.PowerShell cmdlets. Used on a Windows backup server, where the
 	              module is available to job scripts. Sets the real "backup from a storage
-	              snapshot at this path" mode (internal ThirdParty). Ported from PureVeeamFA.psm1.
+	              snapshot at this path" mode (internal ThirdParty).
 	  Rest        Veeam REST API v1 on port 9419. The only interface available to job scripts on
 	              the Veeam Software Appliance. On 13.1.1.x it maps processingMode
 	              'StorageSnapshot' to the wrong internal mode and the job silently reads the

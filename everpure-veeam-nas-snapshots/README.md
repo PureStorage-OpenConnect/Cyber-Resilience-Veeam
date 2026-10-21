@@ -36,6 +36,24 @@ is in the mode the console calls "Backup from a storage snapshot at the followin
 scripts set that mode on every repoint so the setup is correct even when a share was added in
 Direct mode.
 
+### Retries and cancelled jobs
+
+Veeam runs the pre-job script once per job run, not again for an automatic retry, and runs the
+post-job script only after the last retry. A share that failed in the first attempt is therefore
+retried against the snapshot the first attempt created, and the post phase cleans up once at the
+end (verified on 13.1.1.18).
+
+A job that an operator stops is different: Veeam does not run the post-job script for a stopped
+session (its log says "Error running post-job. File not found: pwsh.exe", which is misleading).
+The snapshots of that run stay on the arrays and the shares stay pointed at them until the next
+pre phase, which creates fresh snapshots and sweeps anything older than
+`Snapshot.SweepOlderThan`. To clean up immediately, run the post phase by hand under the same
+account the job uses:
+
+```powershell
+pwsh -File .\Invoke-EverpureVeeamNasSnapshot.ps1 -Phase post -ConfigFile .\jobs\<job>.jsonc
+```
+
 ## Platforms and backends
 
 | | Windows backup server | Veeam Software Appliance |
@@ -55,7 +73,7 @@ are detected automatically.
 
 | File | Purpose |
 | --- | --- |
-| `Invoke-EverpureVeeamNasSnapshot.ps1` | Entry point: `-Phase pre|post|verify -ConfigFile <file> [-WhatIf]` |
+| `Invoke-EverpureVeeamNasSnapshot.ps1` | Entry point: `-Phase pre\|post\|verify -ConfigFile <file> [-WhatIf]` |
 | `EverpureVeeamNas.psm1` + `lib/` | Module: configuration, secrets, logging, HTTP, Veeam adapter (PowerShell and REST backends), Purity client (FlashArray and FlashBlade), orchestration |
 | `config.sample.jsonc` | Annotated configuration; copy one per job |
 | `New-EverpureVeeamJobScripts.ps1` | Writes `jobs/<job>.jsonc` and the `<job>-pre.ps1` / `<job>-post.ps1` wrappers |
@@ -102,7 +120,7 @@ The timestamp is UTC. FlashBlade rejects dots in a suffix, hence the hyphen. The
 and the sweep recognise snapshots by the tag and timestamp pattern only, so two jobs that share
 a source should use different tags. FlashBlade has no per-snapshot expiry; its leftovers are
 removed by the sweep. There is no migration from the legacy `Veeam.Backup<timestamp>` names of
-the `flasharray-veeam-nas-snapshots` scripts; clean those up manually.
+the earlier FlashArray-only scripts; clean those up manually.
 
 ## Exit codes
 
