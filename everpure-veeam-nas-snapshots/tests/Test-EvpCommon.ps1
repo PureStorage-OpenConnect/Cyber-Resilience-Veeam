@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestHelper.ps1')
 Initialize-TestCounters
 $projectRoot = Split-Path -Parent $PSScriptRoot
-Import-Module (Join-Path $projectRoot 'EverpureVeeamNas.psm1') -Force
+Import-Module (Join-Path $projectRoot 'EverpureVeeamNas.psd1') -Force
 $platform = Get-EvpPlatform
 $tmp = Get-TestDirectory
 
@@ -196,6 +196,15 @@ Assert-True 'transcript written despite WhatIf preference' ((Test-Path $dryLog) 
 Assert-Equal 'default log dir on windows' (Get-EvpDefaultLogDirectory -Platform ([pscustomobject]@{ IsWindows = $true; InSandbox = $false; SandboxRoot = '/s' }) -InstallRoot '/inst' -ConfigDirectory '/cfg') (Join-Path '/inst' 'log')
 Assert-Equal 'default log dir in sandbox' (Get-EvpDefaultLogDirectory -Platform ([pscustomobject]@{ IsWindows = $false; InSandbox = $true; SandboxRoot = '/var/lib/veeam/scripts/sandbox' }) -InstallRoot '/i' -ConfigDirectory '/c') '/var/lib/veeam/scripts/sandbox/everpure-veeam-nas/log'
 Assert-Equal 'default log dir elsewhere' (Get-EvpDefaultLogDirectory -Platform ([pscustomobject]@{ IsWindows = $false; InSandbox = $false; SandboxRoot = '/s' }) -InstallRoot '/i' -ConfigDirectory '/c') '/c/log'
+
+Write-TestSection 'Version'
+$manifestPath = Join-Path $projectRoot 'EverpureVeeamNas.psd1'
+$manifest = Test-ModuleManifest -Path $manifestPath -ErrorAction Stop
+Assert-Equal 'manifest version is MAJOR.MINOR.PATCH' ([bool]("$($manifest.Version)" -match '^\d+\.\d+\.\d+$')) $true
+Assert-Equal 'Get-EvpVersion matches the manifest' (Get-EvpVersion) "$($manifest.Version)"
+Assert-Equal 'loaded module carries the manifest version' (Get-Module EverpureVeeamNas).Version "$($manifest.Version)"
+$changelog = Get-Content -LiteralPath (Join-Path $projectRoot 'CHANGELOG.md') -Raw
+Assert-True 'CHANGELOG has an entry for the current version' ($changelog -match ('(?m)^## \[' + [regex]::Escape("$($manifest.Version)") + '\]'))
 
 Write-TestSection 'Exit code table'
 $codes = Get-EvpExitCodeTable

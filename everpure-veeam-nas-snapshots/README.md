@@ -74,11 +74,12 @@ are detected automatically.
 | File | Purpose |
 | --- | --- |
 | `Invoke-EverpureVeeamNasSnapshot.ps1` | Entry point: `-Phase pre\|post\|verify -ConfigFile <file> [-WhatIf]` |
-| `EverpureVeeamNas.psm1` + `lib/` | Module: configuration, secrets, logging, HTTP, Veeam adapter (PowerShell and REST backends), Purity client (FlashArray and FlashBlade), orchestration |
+| `EverpureVeeamNas.psd1`, `EverpureVeeamNas.psm1` + `lib/` | Module: manifest with the version, then configuration, secrets, logging, HTTP, Veeam adapter (PowerShell and REST backends), Purity client (FlashArray and FlashBlade), orchestration |
 | `config.sample.jsonc` | Annotated configuration; copy one per job |
 | `New-EverpureVeeamJobScripts.ps1` | Writes `jobs/<job>.jsonc` and the `<job>-pre.ps1` / `<job>-post.ps1` wrappers |
 | `Protect-EverpureVeeamSecret.ps1` | Stores an API token or the Veeam password in a protected file and verifies it |
 | `tests/` | Test suite, runs anywhere: `pwsh -NoProfile -File tests/Invoke-Tests.ps1` |
+| `CHANGELOG.md` | What changed in each release |
 
 ## Installation (Windows backup server)
 
@@ -148,6 +149,16 @@ for the job log, the sentinel path is what protects the backup.
   beside the secret would protect nothing. File permissions are the boundary there too.
 * TLS: `skip` accepts any certificate (the default, both products ship self-signed ones),
   `system` uses the trust store, `thumbprint:<SHA-1 or SHA-256>` pins one certificate.
+
+## Versioning
+
+The scripts follow [Semantic Versioning](https://semver.org) (MAJOR.MINOR.PATCH). MAJOR
+changes need action on the backup server, such as a configuration key that was renamed or a
+different command line in the Veeam job. MINOR adds behaviour while existing configurations
+keep working. PATCH fixes bugs. The version is declared once, as `ModuleVersion` in
+`EverpureVeeamNas.psd1`; every run prints it as the first line of the plan ("Script version")
+so a transcript always shows which release produced it, and `Get-EvpVersion` returns it to a
+session that imported the module. [CHANGELOG.md](CHANGELOG.md) lists every release.
 
 ## Tests
 

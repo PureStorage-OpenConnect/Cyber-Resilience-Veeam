@@ -90,7 +90,7 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-Import-Module -Name (Join-Path $PSScriptRoot 'EverpureVeeamNas.psm1') -Force -ErrorAction Stop
+Import-Module -Name (Join-Path $PSScriptRoot 'EverpureVeeamNas.psd1') -Force -ErrorAction Stop
 $platform = Get-EvpPlatform
 $fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
 $isToken = ($SecretType -eq 'ArrayApiToken')

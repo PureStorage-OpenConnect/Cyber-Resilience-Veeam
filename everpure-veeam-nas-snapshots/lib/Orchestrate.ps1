@@ -57,6 +57,7 @@ function Write-EvpPlan {
 	<# Prints the resolved configuration at the start of every run. #>
 	[CmdletBinding()]
 	param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Platform, [Parameter(Mandatory)] [string] $Phase, [switch] $DryRun)
+	Write-Host "Script version     : $(Get-EvpVersion)"
 	Write-Host "Configuration file : $($Config.ConfigPath)"
 	Write-Host "Phase              : $Phase"
 	Write-Host "Platform           : $($Platform.Name), running as $($Platform.Identity)$(if ($Platform.InSandbox) { ' (appliance sandbox)' })"

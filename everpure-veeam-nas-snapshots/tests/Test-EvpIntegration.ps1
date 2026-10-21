@@ -26,7 +26,7 @@ $env:EVP_TEST_CALLLOG = Join-Path $tmp 'veeam-calls.jsonl'
 $env:EVP_TEST_CONNECT_FAIL = $null
 $httpLog = Join-Path $tmp 'http-calls.jsonl'
 
-Import-Module (Join-Path $projectRoot 'EverpureVeeamNas.psm1') -Force
+Import-Module (Join-Path $projectRoot 'EverpureVeeamNas.psd1') -Force
 $platform = Get-EvpPlatform
 
 function Reset-Logs { Remove-Item $env:EVP_TEST_CALLLOG, $httpLog -ErrorAction SilentlyContinue }
@@ -332,7 +332,7 @@ $env:EVP_TEST_CONNECT_FAIL = $null
 Write-TestSection 'Entry script end to end (child process)'
 $entry = Join-Path $projectRoot 'Invoke-EverpureVeeamNasSnapshot.ps1'
 $stubsPath = Join-Path $PSScriptRoot 'Stubs.ps1'
-$modulePath = Join-Path $projectRoot 'EverpureVeeamNas.psm1'
+$modulePath = Join-Path $projectRoot 'EverpureVeeamNas.psd1'
 function Invoke-Entry([string] $Phase, [string] $Config, [switch] $WhatIf) {
 	# The child imports the module, installs the mock transport (a global, so the entry script's
 	# Import-Module -Force keeps it), then runs the real entry script.
@@ -353,6 +353,7 @@ Reset-Logs
 $r = Invoke-Entry -Phase verify -Config $cfgPath
 Assert-Equal 'verify exit 0' $r.ExitCode 0
 Assert-True 'prints plan' ($r.Output -match 'Phase\s+: verify')
+Assert-True 'prints script version' ($r.Output -match ('Script version\s+: ' + [regex]::Escape((Get-EvpVersion))))
 Assert-True 'prints exit code' ($r.Output -match 'Exit code: 0')
 $logFiles = @(Get-ChildItem (Join-Path (Split-Path $cfgPath) 'log') -Filter 'lab-job-*-verify.log')
 Assert-Equal 'transcript written next to config (Logging.Directory=log)' $logFiles.Count 1

@@ -30,6 +30,11 @@
 
 $script:EvpModuleRoot = $PSScriptRoot
 
+# The manifest is the single source of the version (semantic versioning, see CHANGELOG.md). It
+# is read from the file rather than from the loaded module object so the value is right even
+# when the .psm1 is imported directly, as older installations and ad-hoc sessions do.
+$script:EvpVersion = [string](Import-PowerShellDataFile -LiteralPath (Join-Path $PSScriptRoot 'EverpureVeeamNas.psd1')).ModuleVersion
+
 # Module functions run with the module's own preference, not the caller's. Without this a .NET
 # method exception (file access denied, for example) is written and execution carries on, which
 # produced a transcript saying "Wrote secret" after the write had failed.
@@ -45,6 +50,14 @@ function Get-EvpModuleRoot {
 	[OutputType([string])]
 	param()
 	return $script:EvpModuleRoot
+}
+
+function Get-EvpVersion {
+	<# Version of these scripts, as declared in EverpureVeeamNas.psd1 (MAJOR.MINOR.PATCH). #>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param()
+	return $script:EvpVersion
 }
 
 Export-ModuleMember -Function @(
@@ -64,5 +77,5 @@ Export-ModuleMember -Function @(
 	'Connect-EvpArray', 'Invoke-EvpArrayApi', 'Resolve-EvpArraySource', 'New-EvpArraySnapshot', 'Get-EvpArraySnapshots', 'Remove-EvpArraySnapshots',
 	# Orchestrate
 	'Get-EvpExitCodeTable', 'Write-EvpPlan', 'Invoke-EvpPrePhase', 'Invoke-EvpPostPhase', 'Invoke-EvpVerifyPhase',
-	'Get-EvpModuleRoot'
+	'Get-EvpModuleRoot', 'Get-EvpVersion'
 )

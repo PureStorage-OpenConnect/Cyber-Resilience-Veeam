@@ -58,6 +58,9 @@
 	Exit codes: 0 success, 1 configuration, 2 Veeam connection, 3 share resolution or update,
 	4 array connection, 5 snapshot create or destroy, 6 partial success, 10 failure with the
 	fail-safe path applied. Veeam treats any non-zero code as a warning and runs the job.
+
+	Version: ModuleVersion in EverpureVeeamNas.psd1 (semantic versioning), printed at the start
+	of every run and listed in CHANGELOG.md.
 #>
 
 #Requires -Version 7.0
@@ -72,7 +75,7 @@ param(
 $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 
-Import-Module -Name (Join-Path $PSScriptRoot 'EverpureVeeamNas.psm1') -Force -ErrorAction Stop
+Import-Module -Name (Join-Path $PSScriptRoot 'EverpureVeeamNas.psd1') -Force -ErrorAction Stop
 
 $platform = Get-EvpPlatform
 $exitCode = 1

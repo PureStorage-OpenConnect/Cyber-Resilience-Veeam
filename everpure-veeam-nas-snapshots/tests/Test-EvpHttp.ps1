@@ -21,7 +21,7 @@ $ErrorActionPreference = 'Stop'
 . (Join-Path $PSScriptRoot 'TestHelper.ps1')
 Initialize-TestCounters
 $projectRoot = Split-Path -Parent $PSScriptRoot
-Import-Module (Join-Path $projectRoot 'EverpureVeeamNas.psm1') -Force
+Import-Module (Join-Path $projectRoot 'EverpureVeeamNas.psd1') -Force
 
 # --- self-signed certificate for 127.0.0.1 -----------------------------------------------------
 $rsa = [System.Security.Cryptography.RSA]::Create(2048)
