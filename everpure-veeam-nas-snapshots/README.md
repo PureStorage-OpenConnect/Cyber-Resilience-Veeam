@@ -15,14 +15,15 @@ A Veeam file backup job runs the **pre** phase before it starts and the **post**
 it finishes.
 
 ```
-pre   1. open Veeam, resolve every share of the job in the inventory (a miss stops here)
+pre   0. job guard: a session of the bound job (Veeam.JobId) must be running, else stop
+      1. open Veeam, resolve every share of the job in the inventory (a miss stops here)
       2. log in to every array, map each share to its managed directory / file system
       3. create ONE snapshot per source, tagged and timestamped
       4. point every share at <share>/.snapshot/<name>, failover off, mode StorageSnapshot
       5. sweep snapshots with the tag older than Snapshot.SweepOlderThan
       on failure after step 1: point every share at a non-existent sentinel path (fail-safe)
-post  destroy the snapshots carrying the tag on every source of the job
-verify check secrets, Veeam, shares, arrays and sources; change nothing
+post  job guard, then destroy the snapshots carrying the tag on every source of the job
+verify check secrets, Veeam, the bound job and its shares, arrays and sources; change nothing
 ```
 
 **Why the fail-safe.** Veeam only warns when a pre-job script fails and runs the job anyway.
@@ -35,6 +36,16 @@ failover to direct backup from the file share is disabled`.
 is in the mode the console calls "Backup from a storage snapshot at the following path". The
 scripts set that mode on every repoint so the setup is correct even when a share was added in
 Direct mode.
+
+**Job guard (`Veeam.JobId`).** Veeam gives a job script no hint which job started it. A cloned
+job inherits the script command lines and would repoint this job's shares and destroy its
+snapshots. With `Veeam.JobId` set, which the generator fills in, the pre and post phases first
+check that a session of exactly that job is active. That is always the case when Veeam itself
+runs the script, and never when a clone or another job does, so the phase stops before
+changing anything. The verify phase also compares the job's shares with the `Shares` list and
+reports any share the job would back up live. A `-WhatIf` dry run only warns. For a manual run
+outside a job session add `-NoJobGuard`. The guard cannot tell a clone apart from the original
+while both run at the same time.
 
 ### Retries and cancelled jobs
 
@@ -51,7 +62,7 @@ pre phase, which creates fresh snapshots and sweeps anything older than
 account the job uses:
 
 ```powershell
-pwsh -File .\Invoke-EverpureVeeamNasSnapshot.ps1 -Phase post -ConfigFile .\jobs\<job>.jsonc
+pwsh -File .\Invoke-EverpureVeeamNasSnapshot.ps1 -Phase post -ConfigFile .\jobs\<job>.jsonc -NoJobGuard
 ```
 
 ## Platforms and backends
@@ -73,7 +84,7 @@ are detected automatically.
 
 | File | Purpose |
 | --- | --- |
-| `Invoke-EverpureVeeamNasSnapshot.ps1` | Entry point: `-Phase pre\|post\|verify -ConfigFile <file> [-WhatIf]` |
+| `Invoke-EverpureVeeamNasSnapshot.ps1` | Entry point: `-Phase pre\|post\|verify -ConfigFile <file> [-WhatIf] [-NoJobGuard]` |
 | `EverpureVeeamNas.psd1`, `EverpureVeeamNas.psm1` + `lib/` | Module: manifest with the version, then configuration, secrets, logging, HTTP, Veeam adapter (PowerShell and REST backends), Purity client (FlashArray and FlashBlade), orchestration |
 | `config.sample.jsonc` | Annotated configuration; copy one per job |
 | `New-EverpureVeeamJobScripts.ps1` | Writes `jobs/<job>.jsonc` and the `<job>-pre.ps1` / `<job>-post.ps1` wrappers |
@@ -85,12 +96,19 @@ are detected automatically.
 
 1. Install PowerShell 7 if needed. Copy this folder to the backup server, for example
    `C:\01_SCRIPTS\everpure-veeam-nas`.
-2. Create the job files: `.\New-EverpureVeeamJobScripts.ps1 -Job <job>`. Edit
+2. Create the job files: `.\New-EverpureVeeamJobScripts.ps1 -Job <job>`. On the backup server
+   it looks the job up and writes its ID to `Veeam.JobId`; elsewhere pass `-JobId`. Edit
    `jobs\<job>.jsonc`: one entry per array, one entry per share exactly as the Veeam inventory
-   shows it (`\\server\share` or `server:/export`).
-3. Store each array's API token, then verify it:
+   shows it (`\\server\share` or `server:/export`). A sub-folder or single-file job object
+   still belongs to its share; list the share.
+3. Store each array's API token, then verify it, from an **elevated** PowerShell (Run as
+   administrator):
    `.\Protect-EverpureVeeamSecret.ps1 -Path .\jobs\secrets\<array>.token -Endpoint <array> -Verify`
-   The token needs the `storage_admin` role (create and destroy snapshots, read exports).
+   The helper restricts the file ACL to SYSTEM and Administrators as soon as it is written. In a
+   non-elevated session UAC filters your Administrators membership, so the read-back for
+   `-Verify` (and later `-VerifyOnly`) fails with access denied even though you are an
+   administrator. The token needs the `storage_admin` role (create and destroy snapshots, read
+   exports).
 4. Run `pwsh -NoProfile -File .\Invoke-EverpureVeeamNasSnapshot.ps1 -Phase verify -ConfigFile .\jobs\<job>.jsonc`
    and fix whatever it reports. Repeat under the Veeam service account to prove it can read the
    secrets: `psexec -s pwsh -NoProfile -File ... -Phase verify ...`.
@@ -107,7 +125,10 @@ Only once Veeam ships the REST fix. Then: generate the job files on a workstatio
 folder to `/var/lib/veeam/scripts` through the console's Files node, store the tokens with
 `Protect-EverpureVeeamSecret.ps1` over SSH (mode 0640, group `veeam-grp-data`), set
 `Veeam.Server` to the appliance FQDN and `Veeam.User`/`Veeam.PasswordFile`, and select
-`jobs/<job>-pre.ps1` and `jobs/<job>-post.ps1` in the job dialog.
+`jobs/<job>-pre.ps1` and `jobs/<job>-post.ps1` in the job dialog. Root is not needed for the
+verification there: the account that writes the file owns it and mode 0640 lets the owner read
+it back. Only the `chgrp veeam-grp-data` step needs root or membership in that group; the helper
+warns when it could not set the group, and without it the sandbox account cannot read the file.
 
 ## Snapshot naming
 
@@ -144,7 +165,10 @@ for the job log, the sentinel path is what protects the backup.
 * Tokens and passwords never appear in the configuration, in a command line or in a log. They
   are unwrapped only at the call site.
 * DPAPI at LocalMachine scope means any account that can read the file can decrypt it. The ACL
-  is the boundary; the helper restricts it to SYSTEM and Administrators.
+  is the boundary; the helper restricts it to SYSTEM and Administrators. That is also why
+  `Protect-EverpureVeeamSecret.ps1` must run elevated on Windows: a non-elevated session carries
+  a UAC-filtered token in which the Administrators group is deny-only, so it can write the file
+  but cannot read it back for `-Verify` or `-VerifyOnly`.
 * On the appliance nothing host-unique is visible inside the script sandbox, so a key file
   beside the secret would protect nothing. File permissions are the boundary there too.
 * TLS: `skip` accepts any certificate (the default, both products ship self-signed ones),

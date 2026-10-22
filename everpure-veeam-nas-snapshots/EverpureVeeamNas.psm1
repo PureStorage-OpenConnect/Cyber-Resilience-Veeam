@@ -73,6 +73,7 @@ Export-ModuleMember -Function @(
 	'Set-EvpHttpInvoker', 'Invoke-EvpHttp', 'Get-EvpHttpErrorText',
 	# Veeam
 	'Connect-EvpVeeam', 'Disconnect-EvpVeeam', 'Test-EvpVeeamModule', 'Get-EvpVeeamShares', 'Find-EvpVeeamShare', 'Set-EvpVeeamStorageSnapshotPath',
+	'Get-EvpVeeamJob', 'Get-EvpVeeamActiveJobSessions', 'Assert-EvpVeeamJobSession',
 	# Pure
 	'Connect-EvpArray', 'Invoke-EvpArrayApi', 'Resolve-EvpArraySource', 'New-EvpArraySnapshot', 'Get-EvpArraySnapshots', 'Remove-EvpArraySnapshots',
 	# Orchestrate

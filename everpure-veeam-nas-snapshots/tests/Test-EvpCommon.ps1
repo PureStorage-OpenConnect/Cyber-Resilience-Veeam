@@ -134,6 +134,7 @@ Test-ConfigError 'bad tag (numeric)' '{ "Arrays": [ { "Name": "fa", "Endpoint": 
 Test-ConfigError 'bad lifetime' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "Lifetime": "1m" } }' 'Snapshot.Lifetime'
 Test-ConfigError 'user without password' '{ "Veeam": { "User": "x" }, "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'must be set together'
 Test-ConfigError 'bad backend' '{ "Veeam": { "Backend": "soap" }, "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'Veeam.Backend'
+Test-ConfigError 'bad job id' '{ "Veeam": { "JobId": "not-a-guid" }, "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'Veeam.JobId'
 Test-ConfigError 'bad tls' '{ "Veeam": { "Tls": "yolo" }, "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'Veeam.Tls'
 Test-ConfigError 'bad platform' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t", "Platform": "Netapp" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'Platform must be'
 $path = Write-TestFile -Path (Join-Path $tmp 'jobs/multi.jsonc') -Content '{ "Arrays": [ { "Name": "fa", "Endpoint": "e" } ], "Shares": [ { "VeeamPath": "bad", "Array": "zz" } ], "Snapshot": { "Tag": "a.b" } }'

@@ -411,3 +411,92 @@ function Set-EvpVeeamStorageSnapshotPath {
 }
 
 #endregion
+
+#region Job binding (Veeam.JobId)
+
+function Get-EvpVeeamJob {
+	<#
+	.SYNOPSIS
+		Looks up the Veeam job a configuration is bound to (Veeam.JobId).
+	.OUTPUTS
+		Record with Id, Name, Type and ShareRoots: the share paths behind the job's objects
+		(a sub-folder or single-file object resolves to its share), or $null when the backend
+		cannot list them.
+	#>
+	[CmdletBinding()]
+	[OutputType([psobject])]
+	param([Parameter(Mandatory)] $Session, [Parameter(Mandatory)] [string] $JobId)
+
+	if ($Session.Backend -eq 'PowerShell') {
+		$job = $null
+		try { $job = Get-VBRUnstructuredBackupJob -Id $JobId -ErrorAction Stop } catch { $job = $null }
+		if (-not $job) { throw "No file backup job with ID '$JobId' exists on this backup server. Veeam.JobId is stale (job deleted and re-created?) or belongs to another server." }
+		$roots = @($job.BackupObject | ForEach-Object {
+				if ($_.Server -and $_.Server.Path) { [string]$_.Server.Path } elseif ($_.Path) { [string]$_.Path }
+			} | Where-Object { $_ } | Sort-Object -Unique)
+		return [pscustomobject]@{ Id = ([string]$job.Id).ToLowerInvariant(); Name = [string]$job.Name; Type = $job.GetType().Name; ShareRoots = $roots }
+	}
+	# REST: /api/v1/jobs/{id}. Whether a build lists file backup jobs there is not guaranteed.
+	try {
+		$job = Invoke-EvpVeeamRest -Session $Session -Path "/api/v1/jobs/$JobId"
+	} catch { throw "Job '$JobId' could not be read through the REST API: $($_.Exception.Message)" }
+	if (-not $job -or -not $job.id) { throw "No job with ID '$JobId' exists on this backup server. Veeam.JobId is stale or belongs to another server." }
+	return [pscustomobject]@{ Id = ([string]$job.id).ToLowerInvariant(); Name = [string]$job.name; Type = [string]$job.type; ShareRoots = $null }
+}
+
+function Get-EvpVeeamActiveJobSessions {
+	<#
+	.SYNOPSIS
+		Lists the sessions of a job that are not stopped, i.e. the run a job script belongs to.
+	#>
+	[CmdletBinding()]
+	[OutputType([object[]])]
+	param([Parameter(Mandatory)] $Session, [Parameter(Mandatory)] $Job)
+
+	if ($Session.Backend -eq 'PowerShell') {
+		# Filtered by job name: Get-VBRBackupSession without a filter walks every session on the server.
+		$all = @(Get-VBRUnstructuredBackupSession -Name $Job.Name -ErrorAction SilentlyContinue)
+		return @($all | Where-Object { ([string]$_.JobId).ToLowerInvariant() -eq $Job.Id -and [string]$_.State -ne 'Stopped' } | ForEach-Object {
+				[pscustomobject]@{ Id = [string]$_.Id; State = [string]$_.State; CreationTime = $_.CreationTime } })
+	}
+	$body = Invoke-EvpVeeamRest -Session $Session -Path "/api/v1/sessions?jobIdFilter=$($Job.Id)&limit=200"
+	return @($body.data | Where-Object { [string]$_.state -ne 'Stopped' } | ForEach-Object {
+			[pscustomobject]@{ Id = [string]$_.id; State = [string]$_.state; CreationTime = $_.creationTime } })
+}
+
+function Assert-EvpVeeamJobSession {
+	<#
+	.SYNOPSIS
+		Job guard: proves that the configured job is the one running this script.
+	.DESCRIPTION
+		Veeam gives a pre/post-job script no hint which job started it. A cloned job inherits the
+		script settings and would therefore repoint this job's shares and destroy its snapshots.
+		Veeam runs job scripts inside the job session, so a session of Veeam.JobId must be active
+		right now; otherwise the caller is a different job and the phase stops before changing
+		anything. With -WarnOnly (dry runs) a missing session is only reported.
+	.OUTPUTS
+		The job record, or $null when no Veeam.JobId is configured.
+	#>
+	[CmdletBinding()]
+	[OutputType([psobject])]
+	param(
+		[Parameter(Mandatory)] $Session,
+		[Parameter(Mandatory)] $Config,
+		[Parameter(Mandatory)] [string] $Phase,
+		[switch] $WarnOnly
+	)
+
+	if (-not $Config.Veeam.JobId) { return $null }
+	$job = Get-EvpVeeamJob -Session $Session -JobId $Config.Veeam.JobId
+	$active = @(Get-EvpVeeamActiveJobSessions -Session $Session -Job $job)
+	$detail = if ($active.Count) { ': ' + (($active | ForEach-Object { "$($_.State) since $($_.CreationTime)" }) -join ', ') } else { '' }
+	Write-Host "Job guard: bound to '$($job.Name)' ($($job.Id)), $($active.Count) active session(s)$detail."
+	if ($active.Count -eq 0) {
+		$message = "Job guard: no session of job '$($job.Name)' ($($job.Id)) is running, so this $Phase script was not started by that job. Most likely a cloned job inherited the script settings; give the clone its own configuration file (New-EverpureVeeamJobScripts.ps1). For a manual run add -NoJobGuard."
+		if ($WarnOnly) { Write-Warning "$message (dry run: continuing)"; return $job }
+		throw "$message Nothing was changed."
+	}
+	return $job
+}
+
+#endregion

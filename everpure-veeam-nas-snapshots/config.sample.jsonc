@@ -8,6 +8,14 @@
 // Protect-EverpureVeeamSecret.ps1 instead. // and /* */ comments are allowed; '#' is not.
 {
 	"Veeam": {
+		// Optional: ID of the Veeam job this file belongs to. New-EverpureVeeamJobScripts.ps1
+		// fills it in (-JobId, or looked up by job name on a Windows backup server). When set,
+		// the pre and post phases refuse to run unless a session of exactly this job is active,
+		// so a cloned job that inherited the script settings cannot repoint these shares or
+		// destroy these snapshots. The verify phase also compares the job's shares with Shares
+		// below. Empty disables the guard.
+		"JobId": "",
+
 		// auto: Veeam PowerShell module when it imports (Windows backup server), REST otherwise
 		// (appliance). Or force "PowerShell" / "Rest".
 		"Backend": "auto",

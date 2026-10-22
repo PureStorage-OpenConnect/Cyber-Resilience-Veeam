@@ -120,6 +120,33 @@ function Protect-EvpSecret {
 	}
 }
 
+function Read-EvpSecretBytes {
+	<#
+	.SYNOPSIS
+		Reads a secret file and turns an access-denied error into platform-specific advice.
+	.DESCRIPTION
+		On Windows the file ACL allows only SYSTEM and Administrators, and a non-elevated session
+		carries a UAC-filtered token in which Administrators is deny-only, so the usual cause is a
+		missing elevation. On Linux the file is mode 0640, so the reader must own it or belong to
+		the file's group.
+	#>
+	[CmdletBinding()]
+	[OutputType([byte[]])]
+	param(
+		[Parameter(Mandatory)] [string] $FullPath,
+		[Parameter(Mandatory)] $Platform
+	)
+
+	try {
+		return [System.IO.File]::ReadAllBytes($FullPath)
+	} catch [System.UnauthorizedAccessException] {
+		if ($Platform.IsWindows) {
+			throw "Access to '$FullPath' is denied for $($Platform.Identity). The file ACL allows only SYSTEM and Administrators. Run this from an elevated PowerShell (Administrators rights are filtered by UAC in a normal session), or as the Veeam service account (psexec -s pwsh ...)."
+		}
+		throw "Access to '$FullPath' is denied for $($Platform.Identity). The file is permission-protected (normally mode 0640); the reading account must own it or belong to its group (veeam-grp-data on the appliance)."
+	}
+}
+
 function Unprotect-EvpSecret {
 	<#
 	.SYNOPSIS
@@ -141,7 +168,7 @@ function Unprotect-EvpSecret {
 	if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
 		throw "Secret file '$fullPath' was not found. Create it with Protect-EverpureVeeamSecret.ps1."
 	}
-	$bytes = [System.IO.File]::ReadAllBytes($fullPath)
+	$bytes = Read-EvpSecretBytes -FullPath $fullPath -Platform $Platform
 	if ($bytes.Length -eq 0) { throw "Secret file '$fullPath' is empty." }
 
 	$head = [System.Text.Encoding]::UTF8.GetString($bytes, 0, [Math]::Min(64, $bytes.Length))
@@ -190,7 +217,7 @@ function Test-EvpSecretFile {
 	if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) {
 		return [pscustomobject]@{ Path = $fullPath; Exists = $false; Protection = 'missing'; Permissions = ''; Warnings = @('file does not exist') }
 	}
-	$bytes = [System.IO.File]::ReadAllBytes($fullPath)
+	$bytes = Read-EvpSecretBytes -FullPath $fullPath -Platform $Platform
 	$head = [System.Text.Encoding]::UTF8.GetString($bytes, 0, [Math]::Min(64, $bytes.Length))
 	$isText = -not ($bytes | Select-Object -First 512 | Where-Object { $_ -lt 9 -or ($_ -gt 13 -and $_ -lt 32) -or $_ -eq 127 })
 	$protection = if ($head -like '*<Objs*') { 'CliXml' } elseif ($isText) { 'plain text, file permissions' } else { 'DPAPI LocalMachine' }

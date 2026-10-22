@@ -46,6 +46,11 @@
 	Dry run: logs every snapshot it would create or destroy and every share it would repoint,
 	and changes nothing.
 
+.PARAMETER NoJobGuard
+	Skip the job guard (Veeam.JobId) for this run. Needed when a phase is run by hand outside a
+	job session, for example the post phase after a cancelled job. Never put it in a job's
+	script command line.
+
 .EXAMPLE
 	pwsh -NoProfile -File .\Invoke-EverpureVeeamNasSnapshot.ps1 -Phase verify -ConfigFile .\jobs\lab-files.jsonc
 
@@ -69,7 +74,8 @@
 [CmdletBinding(SupportsShouldProcess, PositionalBinding = $false)]
 param(
 	[Parameter(Mandatory)] [ValidateSet('pre', 'post', 'verify')] [string] $Phase,
-	[Parameter(Mandatory)] [string] $ConfigFile
+	[Parameter(Mandatory)] [string] $ConfigFile,
+	[switch] $NoJobGuard
 )
 
 $ErrorActionPreference = 'Stop'
@@ -93,6 +99,10 @@ try {
 
 	Write-Host ''
 	Write-EvpPlan -Config $config -Platform $platform -Phase $Phase -DryRun:$WhatIfPreference
+	if ($NoJobGuard -and $config.Veeam.JobId) {
+		Write-Host 'Job guard          : DISABLED for this run (-NoJobGuard)'
+		$config.Veeam.JobId = ''
+	}
 
 	switch ($Phase) {
 		'pre' { $exitCode = Invoke-EvpPrePhase -Config $config -Platform $platform -WhatIf:$WhatIfPreference }

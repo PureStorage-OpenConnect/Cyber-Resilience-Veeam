@@ -167,6 +167,10 @@ function Get-EvpConfig {
 	$port = Get-EvpProperty $v 'Port'
 	$force = Get-EvpProperty $v 'ForceAcceptTlsCertificate'
 	$ack = Get-EvpProperty $v 'AcknowledgeRestDefect'
+	$jobId = ([string](Get-EvpProperty $v 'JobId')).Trim()
+	if ($jobId -and $jobId -notmatch '^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$') {
+		$problems.Add("Veeam.JobId must be the job's GUID as shown by Get-VBRUnstructuredBackupJob or the REST API, or empty (got '$jobId').")
+	}
 	$veeam = [ordered]@{
 		Backend                   = $backend
 		Server                    = if (Get-EvpProperty $v 'Server') { [string](Get-EvpProperty $v 'Server') } else { 'localhost' }
@@ -177,6 +181,7 @@ function Get-EvpConfig {
 		ForceAcceptTlsCertificate = if ($null -ne $force) { [bool]$force } else { $true }
 		ApiVersion                = if (Get-EvpProperty $v 'ApiVersion') { [string](Get-EvpProperty $v 'ApiVersion') } else { '1.3-rev2' }
 		AcknowledgeRestDefect     = if ($null -ne $ack) { [bool]$ack } else { $false }
+		JobId                     = $jobId.ToLowerInvariant()
 	}
 
 	# --- Arrays ------------------------------------------------------------------------------

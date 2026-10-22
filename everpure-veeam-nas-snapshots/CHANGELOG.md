@@ -22,6 +22,10 @@ Initial release.
   older snapshots carrying the tag. `post` destroys the snapshots of the run. `verify` checks
   secrets, Veeam access, share resolution, array access and source mapping without changing
   anything.
+- Job guard: with `Veeam.JobId` set (the generator fills it in), the pre and post phases run
+  only inside a session of that job, so a cloned job that inherited the script settings cannot
+  repoint the shares or destroy the snapshots; the verify phase compares the job's shares with
+  the configuration. `-NoJobGuard` for manual runs.
 - Fail-safe sentinel path: when the pre phase fails after the shares were resolved, every share
   is pointed at a non-existent path so the backup job fails visibly instead of reading stale or
   live data.

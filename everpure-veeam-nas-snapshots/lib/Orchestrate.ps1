@@ -62,6 +62,7 @@ function Write-EvpPlan {
 	Write-Host "Phase              : $Phase"
 	Write-Host "Platform           : $($Platform.Name), running as $($Platform.Identity)$(if ($Platform.InSandbox) { ' (appliance sandbox)' })"
 	Write-Host "Veeam              : $($Config.Veeam.Server) backend $($Config.Veeam.Backend)$(if ($Config.Veeam.User) { " user $($Config.Veeam.User)" })"
+	if ($Config.Veeam.JobId) { Write-Host "Bound job          : $($Config.Veeam.JobId) (job guard on)" }
 	foreach ($a in $Config.Arrays.Values) { Write-Host "Array              : $($a.Name) = $($a.Endpoint) ($($a.Platform), TLS $($a.Tls))" }
 	foreach ($s in $Config.Shares) { Write-Host "Share              : $($s.VeeamPath) [$($s.Protocol)] on $($s.Array), source $($s.Source)" }
 	Write-Host "Snapshot tag       : $($Config.Snapshot.Tag), lifetime $($Config.Snapshot.Lifetime) (FlashArray only), sweep older than $($Config.Snapshot.SweepOlderThan)"
@@ -86,6 +87,8 @@ function Invoke-EvpPrePhase {
 	try {
 		Write-EvpSection 'Veeam'
 		$veeam = Connect-EvpVeeam -Config $Config -Platform $Platform
+		# Job guard first: a clone of the job must not get past this point.
+		$null = Assert-EvpVeeamJobSession -Session $veeam -Config $Config -Phase 'pre' -WarnOnly:$WhatIfPreference
 		$inventory = Get-EvpVeeamShares -Session $veeam
 
 		# Resolve every share before touching anything: a typo must not leave an orphan snapshot.
@@ -191,14 +194,24 @@ function Invoke-EvpPostPhase {
 		Post-job: destroy the snapshots this tag created on every source of the job.
 	.DESCRIPTION
 		Destroys every snapshot matching the tag pattern, except those younger than
-		Behaviour.PostKeepYoungerThan (for two jobs sharing one source). Veeam is not contacted;
-		the shares keep pointing at the destroyed path until the next pre-backup run.
+		Behaviour.PostKeepYoungerThan (for two jobs sharing one source). Veeam is contacted only
+		for the job guard (Veeam.JobId); the shares keep pointing at the destroyed path until the
+		next pre-backup run.
 	#>
 	[CmdletBinding(SupportsShouldProcess)]
 	[OutputType([int])]
 	param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Platform)
 
+	$stage = 'Snapshot'
 	try {
+		if ($Config.Veeam.JobId) {
+			Write-EvpSection 'Veeam'
+			$stage = 'Veeam'
+			$veeam = Connect-EvpVeeam -Config $Config -Platform $Platform
+			try { $null = Assert-EvpVeeamJobSession -Session $veeam -Config $Config -Phase 'post' -WarnOnly:$WhatIfPreference }
+			finally { Disconnect-EvpVeeam -Session $veeam }
+			$stage = 'Snapshot'
+		}
 		Write-EvpSection 'Arrays'
 		$plan = Connect-EvpArraysForShares -Config $Config -Platform $Platform -Shares $Config.Shares
 		Write-EvpSection 'Destroy snapshots'
@@ -230,9 +243,9 @@ function Invoke-EvpPostPhase {
 		return $(if ($failed -gt 0) { $script:EvpExitCode.Snapshot } else { $script:EvpExitCode.Success })
 	} catch {
 		Write-Host ''
-		Write-Host "Post-backup phase FAILED: $($_.Exception.Message)"
+		Write-Host "Post-backup phase FAILED during stage '$stage': $($_.Exception.Message)"
 		Write-Verbose $_.ScriptStackTrace
-		return $script:EvpExitCode.Snapshot
+		return $script:EvpExitCode[$stage]
 	}
 }
 
@@ -267,6 +280,28 @@ function Invoke-EvpVerifyPhase {
 	$veeam = $null
 	try {
 		$veeam = Connect-EvpVeeam -Config $Config -Platform $Platform
+		if ($Config.Veeam.JobId) {
+			try {
+				$job = Get-EvpVeeamJob -Session $veeam -JobId $Config.Veeam.JobId
+				$active = @(Get-EvpVeeamActiveJobSessions -Session $veeam -Job $job)
+				Write-Host "OK   bound to job '$($job.Name)' ($($job.Type)); $($active.Count) active session(s) right now. The pre and post phases run only inside a session of this job."
+				if ($null -eq $job.ShareRoots) {
+					Write-Host '     the REST backend does not list the job objects, so Shares is not compared with the job'
+				} else {
+					$configured = @($Config.Shares | ForEach-Object { Get-EvpNormalizedSharePath -VeeamPath $_.VeeamPath })
+					$inJob = @($job.ShareRoots | ForEach-Object { Get-EvpNormalizedSharePath -VeeamPath $_ })
+					foreach ($root in $job.ShareRoots) {
+						if ((Get-EvpNormalizedSharePath -VeeamPath $root) -notin $configured) {
+							Write-Host "FAIL job share '$root' is not in Shares; the job would back it up live"
+							Add-Problem 'Config' "job share '$root' is missing from Shares"
+						}
+					}
+					foreach ($share in $Config.Shares) {
+						if ((Get-EvpNormalizedSharePath -VeeamPath $share.VeeamPath) -notin $inJob) { Write-Warning "$($share.VeeamPath) is configured but not part of job '$($job.Name)'" }
+					}
+				}
+			} catch { Write-Host "FAIL job: $($_.Exception.Message)"; Add-Problem 'Veeam' $_.Exception.Message }
+		}
 		$inventory = Get-EvpVeeamShares -Session $veeam
 		foreach ($share in $Config.Shares) {
 			try {

@@ -30,6 +30,11 @@
 .PARAMETER Job
 	Job name, used for the file names: jobs/<Job>.jsonc, jobs/<Job>-pre.ps1, jobs/<Job>-post.ps1.
 
+.PARAMETER JobId
+	ID of the Veeam job, written to Veeam.JobId in the configuration (the job guard; see the
+	README). When omitted and the Veeam PowerShell module is available, the job is looked up by
+	name on the local backup server.
+
 .PARAMETER JobsDirectory
 	Where the files go. Defaults to a 'jobs' folder beside this script.
 
@@ -47,6 +52,7 @@
 [CmdletBinding(SupportsShouldProcess, PositionalBinding = $false)]
 param(
 	[Parameter(Mandatory)] [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')] [string] $Job,
+	[ValidatePattern('^$|^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')] [string] $JobId,
 	[string] $JobsDirectory,
 	[switch] $Force
 )
@@ -65,10 +71,24 @@ $mainScript = Join-Path $PSScriptRoot 'Invoke-EverpureVeeamNasSnapshot.ps1'
 $configPath = Join-Path $JobsDirectory "$Job.jsonc"
 $written = [System.Collections.Generic.List[string]]::new()
 
+# Job ID for the job guard: given, or looked up by name where the Veeam module is at hand.
+if (-not $JobId -and (Test-EvpVeeamModule)) {
+	try {
+		$found = @(Get-VBRUnstructuredBackupJob -Name $Job -ErrorAction Stop -WarningAction SilentlyContinue)
+		if ($found.Count -eq 1) { $JobId = ([string]$found[0].Id).ToLowerInvariant(); Write-Host "Veeam job '$Job' found, ID $JobId." }
+		elseif ($found.Count -eq 0) { Write-Warning "No file backup job named '$Job' exists on this server. Pass -JobId, or fill in Veeam.JobId once the job exists." }
+		else { Write-Warning "$($found.Count) jobs match '$Job'; pass -JobId." }
+	} catch { Write-Warning "Could not look up job '$Job': $($_.Exception.Message). Pass -JobId, or fill in Veeam.JobId later." }
+} elseif (-not $JobId) {
+	Write-Warning 'The Veeam PowerShell module is not available here, so Veeam.JobId stays empty. Pass -JobId to enable the job guard.'
+}
+
 if ((Test-Path -LiteralPath $configPath) -and -not $Force) {
 	Write-Host "Keeping existing configuration '$configPath' (use -Force to overwrite)."
+	if ($JobId) { Write-Host "  Make sure its Veeam.JobId is `"$JobId`"." }
 } elseif ($PSCmdlet.ShouldProcess($configPath, 'Write configuration skeleton')) {
 	$sample = Get-Content -LiteralPath (Join-Path $PSScriptRoot 'config.sample.jsonc') -Raw
+	if ($JobId) { $sample = $sample.Replace('"JobId": ""', "`"JobId`": `"$JobId`"") }
 	$header = "// Configuration for Veeam job '$Job'. Generated $(Get-Date -Format 'yyyy-MM-dd') from config.sample.jsonc; edit the Arrays and Shares sections.`n"
 	[System.IO.File]::WriteAllText($configPath, $header + $sample, [System.Text.UTF8Encoding]::new($false))
 	$written.Add($configPath)

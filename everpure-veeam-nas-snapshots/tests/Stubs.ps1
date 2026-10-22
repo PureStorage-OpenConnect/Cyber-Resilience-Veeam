@@ -184,6 +184,12 @@ function New-LabRoutes {
 		@{ id = 'save-1'; state = 'Working'; sessionType = 'FileServerSave' }
 	}
 	$routes['GET ^https://vbr:9419/api/v1/sessions/save-1$'] = { @{ id = 'save-1'; state = 'Stopped'; result = @{ result = $(if ($State.VeeamSaveResult) { $State.VeeamSaveResult } else { 'Success' }); message = 'mock' } } }
+	$routes['GET ^https://vbr:9419/api/v1/jobs/([^/?]+)$'] = {
+		param($r, $m)
+		$j = @($State.VeeamJobs | Where-Object { $_.id -eq $m.Groups[1].Value }) | Select-Object -First 1
+		if ($j) { $j } else { New-MockResponse -Status 404 -Body @{ message = 'job not found' } }
+	}
+	$routes['GET ^https://vbr:9419/api/v1/sessions\?jobIdFilter=([^&]+)&limit=200$'] = { param($r, $m); @{ data = @($State.VeeamSessions | Where-Object { $_.jobId -eq $m.Groups[1].Value }) } }
 	return $routes
 }
 
@@ -196,6 +202,8 @@ function New-LabState {
 		FbSnapshotDirEnabled = $true
 		VeeamBuild           = '13.1.1.18'
 		VeeamSaveResult      = 'Success'
+		VeeamJobs            = @()
+		VeeamSessions        = @()
 		VeeamShares          = @(
 			[pscustomobject]@{ id = 'smb-1'; type = 'SMBShare'; path = '\\192.0.2.10\finance-smb'; advancedSettings = [pscustomobject]@{ processingMode = 'Direct'; directBackupFailoverEnabled = $true; storageSnapshotPath = '' } },
 			[pscustomobject]@{ id = 'nfs-1'; type = 'NFSShare'; path = '192.0.2.20:/projects-nfs'; advancedSettings = [pscustomobject]@{ processingMode = 'Direct'; directBackupFailoverEnabled = $true; storageSnapshotPath = '' } }
@@ -245,7 +253,22 @@ function Set-VBRNASSMBServer { param($Server, [string]$StorageSnapshotPath, [swi
 	Write-StubCall ([ordered]@{ Cmdlet = 'Set-VBRNASSMBServer'; Path = $Server.Path; StorageSnapshotPath = $StorageSnapshotPath; Failover = $EnableDirectBackupFailover.IsPresent; Mode = $ProcessingMode }) }
 function Set-VBRNASNFSServer { param($Server, [string]$StorageSnapshotPath, [switch]$EnableDirectBackupFailover, [string]$ProcessingMode, $ErrorAction)
 	Write-StubCall ([ordered]@{ Cmdlet = 'Set-VBRNASNFSServer'; Path = $Server.Path; StorageSnapshotPath = $StorageSnapshotPath; Failover = $EnableDirectBackupFailover.IsPresent; Mode = $ProcessingMode }) }
-Export-ModuleMember -Function Connect-VBRServer, Disconnect-VBRServer, Get-VBRServerSession, Get-VBRUnstructuredServer, Set-VBRNASSMBServer, Set-VBRNASNFSServer
+# Jobs from EVP_TEST_JOBS (JSON array of {Id, Name, ShareRoots[]}), sessions from EVP_TEST_SESSIONS
+# (JSON array of {Id, JobId, Name, State}); both model the lab cmdlets' shapes.
+function Get-VBRUnstructuredBackupJob { param([string[]]$Name, [string[]]$Id, $ErrorAction, $WarningAction)
+	$jobs = @(); if ($env:EVP_TEST_JOBS) { $jobs = @($env:EVP_TEST_JOBS | ConvertFrom-Json) }
+	foreach ($j in $jobs) {
+		if ($Id -and ([string]$Id[0]).ToLowerInvariant() -ne ([string]$j.Id).ToLowerInvariant()) { continue }
+		if ($Name -and $Name[0] -ne $j.Name) { continue }
+		[pscustomobject]@{ Id = [guid]$j.Id; Name = [string]$j.Name; BackupObject = @($j.ShareRoots | ForEach-Object { [pscustomobject]@{ Path = $_; Server = [pscustomobject]@{ Path = $_ } } }) }
+	} }
+function Get-VBRUnstructuredBackupSession { param([string[]]$Name, $ErrorAction)
+	$sessions = @(); if ($env:EVP_TEST_SESSIONS) { $sessions = @($env:EVP_TEST_SESSIONS | ConvertFrom-Json) }
+	foreach ($s in $sessions) {
+		if ($Name -and $s.Name -notin $Name) { continue }
+		[pscustomobject]@{ Id = [guid]$s.Id; JobId = [guid]$s.JobId; Name = [string]$s.Name; State = [string]$s.State; CreationTime = [datetime]'2026-01-01T00:00:00Z' }
+	} }
+Export-ModuleMember -Function Connect-VBRServer, Disconnect-VBRServer, Get-VBRServerSession, Get-VBRUnstructuredServer, Set-VBRNASSMBServer, Set-VBRNASNFSServer, Get-VBRUnstructuredBackupJob, Get-VBRUnstructuredBackupSession
 '@
 	[System.IO.File]::WriteAllText((Join-Path $moduleDir 'Veeam.Backup.PowerShell.psm1'), $content, [System.Text.UTF8Encoding]::new($false))
 	return $Root

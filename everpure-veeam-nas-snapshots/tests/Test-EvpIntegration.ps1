@@ -274,6 +274,75 @@ Assert-Equal 'exit 10' $rc 10
 Assert-Equal 'no snapshot created before the check' @(Get-HttpCalls | Where-Object { $_.Method -eq 'POST' -and $_.Uri -like '*snapshots*' }).Count 0
 
 # ---------------------------------------------------------------------------------------------
+Write-TestSection 'Job guard (Veeam.JobId): PowerShell backend'
+$jobId = 'aaaaaaaa-1111-4111-8111-000000000001'
+$otherId = 'bbbbbbbb-2222-4222-8222-000000000002'
+$labRoots = @('\\192.0.2.10\finance-smb', '\\192.0.2.10\shared', '192.0.2.10:/shared', '192.0.2.20:/projects-nfs')
+$env:EVP_TEST_JOBS = ConvertTo-Json -Compress -Depth 4 -InputObject @(@{ Id = $jobId; Name = 'lab-job'; ShareRoots = $labRoots })
+$bound = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'bound') -Overrides @{ Veeam = @{ JobId = $jobId.ToUpperInvariant() } })
+Assert-Equal 'JobId parsed and lower-cased' $bound.Veeam.JobId $jobId
+# Only a clone's own session is active: the pre phase stops before touching anything.
+$env:EVP_TEST_SESSIONS = ConvertTo-Json -Compress -InputObject @(@{ Id = 'cccccccc-3333-4333-8333-000000000003'; JobId = $otherId; Name = 'lab-job'; State = 'Working' })
+$state = New-LabState; Use-LabMock $state; Reset-Logs
+$rc = Invoke-EvpPrePhase -Config $bound -Platform $platform 6>$null 3>$null
+Assert-Equal 'pre refused: exit 2' $rc 2
+Assert-Equal 'no array call at all' @(Get-HttpCalls).Count 0
+Assert-Equal 'no share touched' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 0
+$rc = Invoke-EvpPrePhase -Config $bound -Platform $platform -WhatIf 6>$null 3>$null
+Assert-Equal 'dry run only warns' $rc 0
+$state = New-LabState
+$state.FbSnapshots = @(@{ name = 'projects-nfs.Veeam-Backup-20200101T000000Z'; source = @{ name = 'projects-nfs' }; destroyed = $false })
+Use-LabMock $state; Reset-Logs
+$rc = Invoke-EvpPostPhase -Config $bound -Platform $platform 6>$null 3>$null
+Assert-Equal 'post refused: exit 2' $rc 2
+Assert-Equal 'nothing destroyed' @(Get-HttpCalls | Where-Object Method -eq 'PATCH').Count 0
+# A session of the bound job is active: both phases run as usual.
+$env:EVP_TEST_SESSIONS = ConvertTo-Json -Compress -InputObject @(
+	@{ Id = 'cccccccc-3333-4333-8333-000000000003'; JobId = $jobId; Name = 'lab-job'; State = 'Stopped' },
+	@{ Id = 'dddddddd-4444-4444-8444-000000000004'; JobId = $jobId; Name = 'lab-job'; State = 'Working' })
+$state = New-LabState; Use-LabMock $state; Reset-Logs
+$rc = Invoke-EvpPrePhase -Config $bound -Platform $platform 6>$null 3>$null
+Assert-Equal 'pre runs inside the job session' $rc 0
+Assert-Equal 'four shares repointed' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 4
+Reset-Logs
+$rc = Invoke-EvpPostPhase -Config $bound -Platform $platform 6>$null 3>$null
+Assert-Equal 'post runs inside the job session' $rc 0
+Assert-True 'post destroyed the run snapshots' (@(Get-HttpCalls | Where-Object Method -eq 'PATCH').Count -ge 1)
+# Unknown job ID (deleted and re-created job).
+$stale = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'stale') -Overrides @{ Veeam = @{ JobId = $otherId } })
+Reset-Logs
+$rc = Invoke-EvpPrePhase -Config $stale -Platform $platform 6>$null 3>$null
+Assert-Equal 'unknown job id: exit 2' $rc 2
+Assert-Equal 'unknown job id: nothing touched' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 0
+# Verify compares the job's shares with Shares.
+$env:EVP_TEST_JOBS = ConvertTo-Json -Compress -Depth 4 -InputObject @(@{ Id = $jobId; Name = 'lab-job'; ShareRoots = $labRoots + '192.0.2.10:/finance-nfs' })
+$state = New-LabState; Use-LabMock $state; Reset-Logs
+$rc = Invoke-EvpVerifyPhase -Config $bound -Platform $platform 6>$null 3>$null
+Assert-Equal 'verify flags a job share missing from Shares (exit 1, config)' $rc 1
+$env:EVP_TEST_JOBS = ConvertTo-Json -Compress -Depth 4 -InputObject @(@{ Id = $jobId; Name = 'lab-job'; ShareRoots = $labRoots })
+$rc = Invoke-EvpVerifyPhase -Config $bound -Platform $platform 6>$null 3>$null
+Assert-Equal 'verify passes when job and Shares agree' $rc 0
+$rc = Invoke-EvpVerifyPhase -Config $stale -Platform $platform 6>$null 3>$null
+Assert-Equal 'verify reports an unknown job id (exit 2)' $rc 2
+$env:EVP_TEST_JOBS = $null; $env:EVP_TEST_SESSIONS = $null
+
+Write-TestSection 'Job guard (Veeam.JobId): REST backend'
+$restBound = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'rest-bound') -Backend 'Rest' -Overrides @{ Veeam = @{ JobId = $jobId }; Shares = @(@{ VeeamPath = '192.0.2.20:/projects-nfs'; Array = 'fb' }) })
+$state = New-LabState; $state.VeeamBuild = '13.2.0.100'
+$state.VeeamJobs = @([pscustomobject]@{ id = $jobId; name = 'lab-job'; type = 'FileBackup' })
+Use-LabMock $state; Reset-Logs
+$rc = Invoke-EvpPrePhase -Config $restBound -Platform $platform 6>$null 3>$null
+Assert-Equal 'REST: pre refused without a session' $rc 2
+Assert-Equal 'REST: no share saved' @(Get-HttpCalls | Where-Object Method -eq 'PUT').Count 0
+$state.VeeamSessions = @([pscustomobject]@{ id = 'eeeeeeee-5555-4555-8555-000000000005'; jobId = $jobId; state = 'Working'; creationTime = '2026-01-01T00:00:00Z' })
+Reset-Logs
+$rc = Invoke-EvpPrePhase -Config $restBound -Platform $platform 6>$null 3>$null
+Assert-Equal 'REST: pre runs inside the session' $rc 0
+Assert-True 'REST: sessions filtered by job id' (@(Get-HttpCalls | Where-Object Uri -like "*sessions?jobIdFilter=$jobId*").Count -ge 1)
+$rc = Invoke-EvpVerifyPhase -Config $restBound -Platform $platform 6>$null 3>$null
+Assert-Equal 'REST: verify passes (no object comparison)' $rc 0
+
+# ---------------------------------------------------------------------------------------------
 Write-TestSection 'Post phase'
 $state = New-LabState
 $old = '20200101T000000Z'

@@ -27,6 +27,13 @@
 	runs job scripts in the sandbox. On both platforms the file permissions are the real
 	boundary; see the README.
 
+	Windows: run from an elevated PowerShell (Run as administrator). The ACL leaves only SYSTEM
+	and Administrators, and a non-elevated session carries a UAC-filtered token in which the
+	Administrators group is deny-only, so -Verify and -VerifyOnly fail with access denied
+	when reading the file back. Linux: no root needed to verify; the owner can read the 0640
+	file. Only chgrp veeam-grp-data needs root or membership in that group (a warning is
+	printed when it fails).
+
 	Run it once per array (SecretType ArrayApiToken) and, if an explicit Veeam user is
 	configured, once for its password (SecretType VeeamPassword). The secret is prompted for
 	unless -Secret is given, so it never appears in a command line or shell history.
