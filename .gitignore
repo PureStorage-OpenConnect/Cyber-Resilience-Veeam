@@ -2,14 +2,18 @@
 log/
 *.log
 
-# The default configuration file name. Job-specific copies are named after the job, so they
-# cannot be matched here -- keep them on the Veeam server, not in a clone.
-# fa-veeam-config.sample.json stays tracked.
-fa-veeam-config.json
-
 # Encrypted credentials -- never commit these
 *.apitoken
 *.cred
 *.clixml
 *.secret
 *.pwd
+
+# Lab notes, probe reports and repro material carry lab host names; they stay local.
+lab/
+
+# Unified scripts (everpure-veeam-nas-snapshots): per-job files and secrets stay on the backup
+# server, never in a clone. config.sample.jsonc stays tracked.
+everpure-veeam-nas-snapshots/jobs/
+everpure-veeam-nas-snapshots/secrets/
+*.token
