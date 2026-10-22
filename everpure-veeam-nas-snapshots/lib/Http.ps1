@@ -55,6 +55,7 @@ function Initialize-EvpCertificatePin {
 using System;
 using System.Net.Http;
 using System.Net.Security;
+using System.Net.Sockets;
 using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 
@@ -77,9 +78,47 @@ namespace Everpure.Veeam
 				return string.Equals(actual, expected, StringComparison.OrdinalIgnoreCase);
 			};
 		}
+
+		// SHA-256 of the DER certificate a TLS server presents, the value Create() pins. Reads
+		// the certificate without trusting it; nothing is sent after the handshake.
+		public static string GetServerCertificateSha256(string host, int port, int timeoutMs)
+		{
+			using (var tcp = new TcpClient())
+			{
+				if (!tcp.ConnectAsync(host, port).Wait(timeoutMs)) { throw new TimeoutException("No TLS answer from " + host + ":" + port + " within " + timeoutMs + " ms."); }
+				tcp.ReceiveTimeout = timeoutMs;
+				tcp.SendTimeout = timeoutMs;
+				using (var ssl = new SslStream(tcp.GetStream(), false, (sender, certificate, chain, errors) => true))
+				{
+					ssl.AuthenticateAsClient(host);
+					return Convert.ToHexString(SHA256.HashData(ssl.RemoteCertificate.GetRawCertData()));
+				}
+			}
+		}
 	}
 }
 '@ -ErrorAction Stop
+}
+
+function Get-EvpServerCertificateHash {
+	<#
+	.SYNOPSIS
+		Returns the SHA-256 hash of the certificate an HTTPS endpoint presents, for Tls 'thumbprint:<hex>'.
+	.DESCRIPTION
+		Trust on first use: compare the value with what the array or Veeam console shows before
+		pinning it.
+	#>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param([Parameter(Mandatory)] [string] $ComputerName, [int] $Port = 443, [int] $TimeoutMilliseconds = 5000)
+	Initialize-EvpCertificatePin
+	try {
+		return [Everpure.Veeam.CertificatePin]::GetServerCertificateSha256($ComputerName, $Port, $TimeoutMilliseconds)
+	} catch {
+		$ex = $_.Exception
+		while ($ex.InnerException) { $ex = $ex.InnerException }
+		throw "Could not read the TLS certificate of ${ComputerName}:${Port}: $($ex.Message)"
+	}
 }
 
 function Get-EvpHttpClient {

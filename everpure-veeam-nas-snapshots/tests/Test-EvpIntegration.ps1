@@ -75,8 +75,17 @@ Assert-Equal 'FB by file system name' $info.Name 'projects-nfs'
 Assert-Equal 'FB snapshot dir flag read' $info.SnapshotDirectoryEnabled 'True'
 $fbCustom = [ordered]@{ VeeamPath = '\\x\custom-share'; Protocol = 'SMB'; Server = 'x'; ShareName = 'custom-share'; Array = 'fb'; Source = 'auto' }
 Assert-Equal 'FB by smb.share_name fallback' (Resolve-EvpArraySource -Session $fb -Share $fbCustom).Name 'renamed-fs'
-Assert-True  'FB fallback used filter' (((Get-HttpCalls).Uri -join ' ') -match "filter=smb\.share_name='custom-share'")
-Assert-Throws 'FB unknown' { Resolve-EvpArraySource -Session $fb -Share $unknown } 'no file system named or exported as'
+Assert-True  'FB export looked up by export_name' (((Get-HttpCalls).Uri -join ' ') -match "file-system-exports\?filter=export_name='custom-share'")
+Reset-Logs
+Assert-Throws 'FB NFS export resolves to its own member' { Resolve-EvpArraySource -Session $fb -Share ([ordered]@{ VeeamPath = 'x:/custom-share'; Protocol = 'NFS'; Server = 'x'; ShareName = 'custom-share'; Array = 'fb'; Source = 'auto' }) } 'exported \(NFS\)'
+Assert-True  'FB export of the other protocol ignored' (((Get-HttpCalls).Uri -join ' ') -match 'names=other-fs' -and ((Get-HttpCalls).Uri -join ' ') -notmatch 'names=renamed-fs')
+$fbDup = [ordered]@{ VeeamPath = '\\x\dup-share'; Protocol = 'SMB'; Server = 'x'; ShareName = 'dup-share'; Array = 'fb'; Source = 'auto' }
+Assert-Throws 'FB export name on two servers is ambiguous' { Resolve-EvpArraySource -Session $fb -Share $fbDup } 'exists for 2 file systems'
+Reset-Logs
+Assert-Throws 'FB unknown' { Resolve-EvpArraySource -Session $fb -Share $unknown } 'no file system named or exported \(SMB\) as'
+Assert-True  'FB unknown name answered 400 and was reported, not used' (((Get-HttpCalls).Uri -join ' ') -match 'file-systems\?names=nope')
+$fbQuoted = [ordered]@{ VeeamPath = "\\x\it's"; Protocol = 'SMB'; Server = 'x'; ShareName = "it's"; Array = 'fb'; Source = 'auto' }
+Assert-Throws 'FB share name with a quote refused, not spliced into the filter' { Resolve-EvpArraySource -Session $fb -Share $fbQuoted } 'single quote'
 
 Write-TestSection 'Purity client: snapshots'
 Reset-Logs
@@ -105,7 +114,7 @@ Assert-Equal 'FA list count' $list.Count 2
 Assert-Equal 'FA list query' ((Get-HttpCalls | Where-Object Method -eq 'GET' | Select-Object -Last 1).Uri) 'https://fa/api/2.42/directory-snapshots?source_names=fs:dir'
 $list = Get-EvpArraySnapshots -Session $fb -SourceName 'myfs'
 Assert-Equal 'FB list uses filter=' ((Get-HttpCalls | Where-Object Method -eq 'GET' | Select-Object -Last 1).Uri) "https://fb/api/2.17/file-system-snapshots?filter=source.name='myfs'"
-Assert-Equal 'FB foreign source item dropped' $list.Count 1
+Assert-Equal 'FB foreign and source-less items dropped' $list.Count 1
 Assert-Equal 'FB list name' $list[0].Name "myfs.Veeam-Backup-$ts"
 Reset-Logs
 $summary = Remove-EvpArraySnapshots -Session $fb -Snapshots $list 6>$null
@@ -360,11 +369,23 @@ $patches = @(Get-HttpCalls | Where-Object Method -eq 'PATCH')
 Assert-Equal 'three tagged snapshots destroyed' $patches.Count 3
 Assert-True 'policy snapshot untouched' (-not ($patches | Where-Object Uri -like '*policy*'))
 Assert-True 'other tag untouched' (-not ($patches | Where-Object Uri -like '*Other-Tag*'))
-Assert-Equal 'no Veeam contact in post' @(Get-VeeamCalls).Count 0
+$disarms = @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*')
+Assert-Equal 'post disarms all four shares' $disarms.Count 4
+Assert-True 'disarm path is the awaiting sentinel' (-not ($disarms | Where-Object { $_.StorageSnapshotPath -notmatch '\.snapshot[\\/]__everpure-awaiting-pre-backup-\d{8}T\d{6}Z__$' }))
+Assert-True 'disarm failover off, mode enforced' (-not ($disarms | Where-Object { $_.Failover -or $_.Mode -ne 'StorageSnapshot' }))
+# Veeam unreachable and no job guard configured: cleanup still runs, the run reports partial.
+$state = New-LabState
+$state.FbSnapshots = @(@{ name = "projects-nfs.Veeam-Backup-$old"; source = @{ name = 'projects-nfs' }; destroyed = $false })
+Use-LabMock $state; Reset-Logs
+$env:EVP_TEST_CONNECT_FAIL = '1'
+$rc = Invoke-EvpPostPhase -Config $config -Platform $platform 6>$null 3>$null
+$env:EVP_TEST_CONNECT_FAIL = $null
+Assert-Equal 'post without Veeam: exit 6 (partial)' $rc 6
+Assert-Equal 'post without Veeam still destroys' @(Get-HttpCalls | Where-Object Method -eq 'PATCH').Count 1
 Reset-Logs
 $rc = Invoke-EvpPostPhase -Config $config -Platform $platform 6>$null 3>$null
 Assert-Equal 'nothing left: still exit 0' $rc 0
-$strict = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'strict') -Overrides @{ Behaviour = @{ FailIfNoSnapshots = $true } })
+$strict = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'strict') -Overrides @{ Behaviour = @{ FailIfNoSnapshots = $true }; Snapshot = @{ KeepFor = 'none' } })
 $rc = Invoke-EvpPostPhase -Config $strict -Platform $platform 6>$null 3>$null
 Assert-Equal 'FailIfNoSnapshots -> exit 5' $rc 5
 $state = New-LabState
@@ -379,6 +400,7 @@ Assert-Equal 'young snapshot kept' @(Get-HttpCalls | Where-Object Method -eq 'PA
 Reset-Logs
 $rc = Invoke-EvpPostPhase -Config $config -Platform $platform -WhatIf 6>$null 3>$null
 Assert-Equal 'post WhatIf no PATCH' @(Get-HttpCalls | Where-Object Method -eq 'PATCH').Count 0
+Assert-Equal 'post WhatIf no disarm' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 0
 
 # ---------------------------------------------------------------------------------------------
 Write-TestSection 'Verify phase'

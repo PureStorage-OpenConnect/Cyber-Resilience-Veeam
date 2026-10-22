@@ -30,6 +30,22 @@ function Assert-EvpDpapi {
 	}
 }
 
+function Assert-EvpSecretWriter {
+	<#
+	.SYNOPSIS
+		Refuses, before anything is written, a Windows session that would lock itself out of the file.
+	.DESCRIPTION
+		The hardened ACL leaves only SYSTEM and Administrators. A non-elevated session carries a
+		UAC-filtered token in which Administrators is deny-only: it could create the file but never
+		read it back, and would be left with a secret it cannot verify or overwrite.
+	#>
+	[CmdletBinding()]
+	param([Parameter(Mandatory)] $Platform, [switch] $SkipAclHardening)
+	if ($Platform.IsWindows -and -not $SkipAclHardening -and $Platform.IsElevated -eq $false) {
+		throw "This PowerShell session is not elevated. The secret file will be readable by SYSTEM and Administrators only, and $($Platform.Identity) in a non-elevated session counts as neither, so it could write the file but not read it back. Nothing was written. Run from an elevated PowerShell (Run as administrator)."
+	}
+}
+
 function Get-EvpUnixFileMode {
 	<# 'mode owner:group' of a file. GNU stat first (Linux), BSD stat as a fallback (macOS dev boxes). #>
 	[CmdletBinding()]
@@ -65,6 +81,7 @@ function Protect-EvpSecret {
 		[string] $Group = 'veeam-grp-data'
 	)
 
+	Assert-EvpSecretWriter -Platform $Platform -SkipAclHardening:$SkipAclHardening
 	$fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
 	$plain = ConvertFrom-EvpSecureString -SecureString $Secret
 	if ([string]::IsNullOrWhiteSpace($plain)) { throw 'The supplied secret is empty.' }
@@ -80,33 +97,45 @@ function Protect-EvpSecret {
 			$blob = [System.Security.Cryptography.ProtectedData]::Protect($bytes, $null, [System.Security.Cryptography.DataProtectionScope]::LocalMachine)
 		} finally { [Array]::Clear($bytes, 0, $bytes.Length) }
 		if ($PSCmdlet.ShouldProcess($fullPath, 'Write DPAPI-protected secret')) {
-			try { [System.IO.File]::WriteAllBytes($fullPath, $blob) } catch [System.UnauthorizedAccessException] {
-				throw "Access to '$fullPath' is denied for $($Platform.Identity). Run this from an elevated PowerShell (Administrators rights are filtered by UAC in a normal session), or grant yourself write access to the secrets folder."
-			}
-			Write-Host "Wrote DPAPI (LocalMachine) protected secret to '$fullPath' ($($blob.Length) bytes)."
-			if (-not $SkipAclHardening) {
-				try {
+			# The file is created with its final ACL, so the secret never sits in it under the
+			# inherited folder ACL (which usually grants BUILTIN\Users read). Windows applies a
+			# security descriptor only when it creates a file, so an existing one is deleted first.
+			try {
+				if (Test-Path -LiteralPath $fullPath) { [System.IO.File]::Delete($fullPath) }
+				if ($SkipAclHardening) {
+					$stream = [System.IO.FileStream]::new($fullPath, [System.IO.FileMode]::CreateNew, [System.IO.FileAccess]::Write, [System.IO.FileShare]::None)
+				} else {
 					$acl = [System.Security.AccessControl.FileSecurity]::new()
 					$acl.SetAccessRuleProtection($true, $false)
 					foreach ($identity in @('NT AUTHORITY\SYSTEM', 'BUILTIN\Administrators')) {
 						$acl.AddAccessRule([System.Security.AccessControl.FileSystemAccessRule]::new($identity, 'FullControl', 'Allow'))
 					}
-					Set-Acl -LiteralPath $fullPath -AclObject $acl
-					Write-Host 'ACL restricted to NT AUTHORITY\SYSTEM and BUILTIN\Administrators.'
-				} catch {
-					Write-Warning "Could not harden the ACL on '$fullPath': $($_.Exception.Message). Restrict it manually: at LocalMachine scope, read access equals knowing the secret."
+					$stream = [System.IO.FileSystemAclExtensions]::Create([System.IO.FileInfo]::new($fullPath), [System.IO.FileMode]::CreateNew,
+						[System.Security.AccessControl.FileSystemRights]::Write, [System.IO.FileShare]::None, 4096, [System.IO.FileOptions]::None, $acl)
 				}
-			} else {
-				Write-Warning 'ACL hardening skipped. Any account able to read this file can decrypt it.'
+			} catch [System.UnauthorizedAccessException] {
+				throw "Access to '$fullPath' is denied for $($Platform.Identity). Run this from an elevated PowerShell (Administrators rights are filtered by UAC in a normal session), or grant yourself write access to the secrets folder."
 			}
+			try { $stream.Write($blob, 0, $blob.Length) } finally { $stream.Dispose() }
+			Write-Host "Wrote DPAPI (LocalMachine) protected secret to '$fullPath' ($($blob.Length) bytes)."
+			if ($SkipAclHardening) { Write-Warning 'ACL hardening skipped. Any account able to read this file can decrypt it.' }
+			else { Write-Host 'ACL restricted to NT AUTHORITY\SYSTEM and BUILTIN\Administrators.' }
 		}
 		return
 	}
 
 	# Linux (and anything else): plain text, owner and group readable only.
 	if ($PSCmdlet.ShouldProcess($fullPath, 'Write permission-protected secret')) {
-		[System.IO.File]::WriteAllText($fullPath, $plain, [System.Text.UTF8Encoding]::new($false))
+		# Restrict the empty file first and write the secret only once that worked, so the secret
+		# never sits in a file others can read. Truncating keeps the mode just set.
+		[System.IO.File]::WriteAllBytes($fullPath, [byte[]]@())
 		& chmod 0640 $fullPath 2>$null
+		if ($LASTEXITCODE -ne 0) {
+			Remove-Item -LiteralPath $fullPath -Force -Confirm:$false -ErrorAction SilentlyContinue
+			throw "Could not restrict '$fullPath' to mode 0640 (chmod exit code $LASTEXITCODE); the secret was not written."
+		}
+		$bytes = [System.Text.UTF8Encoding]::new($false).GetBytes($plain)
+		try { [System.IO.File]::WriteAllBytes($fullPath, $bytes) } finally { [Array]::Clear($bytes, 0, $bytes.Length) }
 		$grpOk = $false
 		if ($Group) {
 			& chgrp $Group $fullPath 2>$null

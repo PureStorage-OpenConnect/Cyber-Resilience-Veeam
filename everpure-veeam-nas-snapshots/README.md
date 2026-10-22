@@ -22,7 +22,8 @@ pre   0. job guard: a session of the bound job (Veeam.JobId) must be running, el
       4. point every share at <share>/.snapshot/<name>, failover off, mode StorageSnapshot
       5. sweep snapshots with the tag older than Snapshot.KeepFor (all earlier ones by default)
       on failure after step 1: point every share at a non-existent sentinel path (fail-safe)
-post  job guard, then destroy the snapshots with the tag older than Snapshot.KeepFor (optional)
+post  job guard, point every share at a non-existent path (disarm), then destroy the
+      snapshots with the tag older than Snapshot.KeepFor (optional, highly recommended)
 verify check secrets, Veeam, the bound job and its shares, arrays and sources; change nothing
 ```
 
@@ -31,6 +32,14 @@ Without the sentinel a failed run would leave the shares pointing at the previou
 at the live share, and the job would report success on stale data. A path that cannot be read
 turns that into a visible failure. Veeam reports `Cannot find a storage snapshot at the specified
 path, and failover to direct backup from the file share is disabled`.
+
+**Why the post phase disarms the shares.** The fail-safe needs a working Veeam connection, so a
+pre phase that fails before it gets that far (Veeam unreachable, credentials expired, script
+killed by Veeam's timeout) cannot apply it. The post phase therefore points every share at a
+non-existent path as soon as the job has finished. A next run whose pre phase fails early then
+fails visibly too, instead of reading the last snapshot again and reporting success on stale
+data. That matters most with a `Snapshot.KeepFor` duration, which keeps the last snapshot on
+purpose.
 
 **Why `EnsureProcessingMode` is on by default.** The snapshot path only matters when the share
 is in the mode the console calls "Backup from a storage snapshot at the following path". The
@@ -44,9 +53,10 @@ both phases destroy only snapshots older than that, so a week of backups stays b
 `.snapshot` on the share, at the cost of the space those snapshots hold on the array. FlashArray
 snapshots additionally carry an expiry of `KeepFor` plus seven days as a backstop for the day the
 scripts never run again; FlashBlade has no per-snapshot expiry, so only the two phases clean up
-there. The post phase is optional. Without it a snapshot stays until the next pre phase, which
-costs one run's worth of changes in array space and keeps the share pointed at a snapshot that
-exists between runs.
+there. `KeepFor` is at most `358d`, so that backstop fits the FlashArray's 365-day limit. The post
+phase is optional but highly recommended. Without it a snapshot stays until the next pre phase,
+which costs one run's worth of changes in array space, and the shares stay pointed at a snapshot
+that exists between runs, so the disarm described above never happens.
 
 **Job guard (`Veeam.JobId`).** Veeam gives a job script no hint which job started it. A cloned
 job inherits the script command lines and would repoint this job's shares and destroy its
@@ -69,7 +79,8 @@ A job that an operator stops is different. Veeam does not run the post-job scrip
 session (its log says "Error running post-job. File not found: pwsh.exe", which is misleading). <!-- style-check: ignore -->
 The snapshots of that run stay on the arrays and the shares stay pointed at them until the next
 pre phase, which creates fresh snapshots and sweeps anything older than `Snapshot.KeepFor`. To
-clean up immediately, run the post phase by hand under the same account the job uses.
+clean up and disarm the shares immediately, run the post phase by hand under the same account
+the job uses.
 
 ```powershell
 pwsh -File .\Invoke-EverpureVeeamNasSnapshot.ps1 -Phase post -ConfigFile .\jobs\<job>.jsonc -NoJobGuard
@@ -114,10 +125,10 @@ are detected automatically.
 3. Store each array's API token and verify it from an **elevated** PowerShell (Run as
    administrator) with
    `.\Protect-EverpureVeeamSecret.ps1 -Path .\jobs\secrets\<array>.token -Endpoint <array> -Verify`.
-   The helper restricts the file ACL to SYSTEM and Administrators as soon as it is written. In a
-   non-elevated session UAC filters your Administrators membership, so the read-back for
-   `-Verify` (and later `-VerifyOnly`) fails with access denied even though you are an
-   administrator. The token needs the `storage_admin` role (create and destroy snapshots, read
+   The helper creates the file with an ACL for SYSTEM and Administrators only. In a non-elevated
+   session UAC filters your Administrators membership, so you could write the file but not read
+   it back; the helper therefore refuses such a session before it asks for the secret and writes
+   nothing. The token needs the `storage_admin` role (create and destroy snapshots, read
    exports).
 4. Run `pwsh -NoProfile -File .\Invoke-EverpureVeeamNasSnapshot.ps1 -Phase verify -ConfigFile .\jobs\<job>.jsonc`
    and fix whatever it reports. Repeat under the Veeam service account to prove it can read the
@@ -145,12 +156,15 @@ warns when it could not set the group, and without it the sandbox account cannot
 | | FlashArray File | FlashBlade |
 | --- | --- | --- |
 | API call | `client_name=<Tag>`, `suffix=<timestamp>` | `suffix=<Tag>-<timestamp>` |
-| Array object | `<dir>.Veeam-Backup.20261020T081500Z` | `<fs>.Veeam-Backup-20261020T081500Z` |
-| Share path | `.snapshot/Veeam-Backup.20261020T081500Z` | `.snapshot/<fs>.Veeam-Backup-20261020T081500Z` |
+| Array object | `<dir>.veeam-files.20261020T081500Z` | `<fs>.veeam-files-20261020T081500Z` |
+| Share path | `.snapshot/veeam-files.20261020T081500Z` | `.snapshot/<fs>.veeam-files-20261020T081500Z` |
 
-The timestamp is UTC. FlashBlade rejects dots in a suffix, hence the hyphen. The post phase
-and the sweep recognise snapshots by the tag and timestamp pattern only, so two jobs that share
-a source should use different tags. FlashBlade has no per-snapshot expiry; its leftovers are
+The examples are for a configuration file `jobs/files.jsonc`. The timestamp is UTC. FlashBlade
+rejects dots in a suffix, hence the hyphen. The post phase and the sweep recognise snapshots by
+the tag and timestamp pattern only, so every job needs its own tag. The default, `veeam-` plus
+the configuration file name reduced to letters, digits and `-`, gives each job one; set
+`Snapshot.Tag` only to keep the names of an existing setup, never to the tag of another job on
+the same source. FlashBlade has no per-snapshot expiry; its leftovers are
 removed by the sweep. There is no migration from the legacy `Veeam.Backup<timestamp>` names of
 the earlier FlashArray-only scripts; clean those up manually.
 
@@ -164,7 +178,7 @@ the earlier FlashArray-only scripts; clean those up manually.
 | 3 | share resolution or update |
 | 4 | array authentication or connectivity |
 | 5 | snapshot create or destroy |
-| 6 | partial success (backup set up, sweep had failures) |
+| 6 | partial success: pre set the backup up but the sweep had failures, or post cleaned up but could not disarm every share |
 | 10 | failure, fail-safe path applied |
 
 Veeam treats every non-zero code as a warning and runs the job; the codes are for operators and
@@ -177,12 +191,16 @@ for the job log, the sentinel path is what protects the backup.
 * DPAPI at LocalMachine scope means any account that can read the file can decrypt it. The ACL
   is the boundary; the helper restricts it to SYSTEM and Administrators. That is also why
   `Protect-EverpureVeeamSecret.ps1` must run elevated on Windows. A non-elevated session carries
-  a UAC-filtered token in which the Administrators group is deny-only, so it can write the file
-  but cannot read it back for `-Verify` or `-VerifyOnly`.
+  a UAC-filtered token in which the Administrators group is deny-only, so it could write the
+  file but not read it back. The helper refuses it before writing anything.
 * On the appliance nothing host-unique is visible inside the script sandbox, so a key file
   beside the secret would protect nothing. File permissions are the boundary there too.
 * **TLS.** `skip` accepts any certificate (the default, both products ship self-signed ones),
-  `system` uses the trust store, `thumbprint:<SHA-1 or SHA-256>` pins one certificate.
+  `system` uses the trust store, `thumbprint:<SHA-1 or SHA-256>` pins one certificate. With
+  `skip` anyone on the management network who can intercept the connection gets the array API
+  token, which can destroy snapshots. Pin it: `Protect-EverpureVeeamSecret.ps1 -Verify` (or
+  `-VerifyOnly`) prints the array's SHA-256 certificate hash, and the verify phase warns for every
+  endpoint still on `skip`.
 
 ## Versioning
 

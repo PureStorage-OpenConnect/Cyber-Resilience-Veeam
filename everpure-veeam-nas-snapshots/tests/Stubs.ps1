@@ -141,12 +141,21 @@ function New-LabRoutes {
 			$enabled = if ($null -ne $State.FbSnapshotDirEnabled) { $State.FbSnapshotDirEnabled } else { $true }
 			return @{ items = @(@{ name = $name; snapshot_directory_enabled = $enabled; nfs = @{ export_name = '' }; smb = @{ share_name = '' } }) }
 		}
-		@{ items = @() }
+		# An unknown name is an error, not an empty list.
+		New-MockResponse -Status 400 -Body @{ errors = @(@{ message = 'File system does not exist.'; context = $name }) }
 	}
-	$routes["GET ^https://fb/api/2\.17/file-systems\?filter=(smb\.share_name|nfs\.export_name)='(.+)'$"] = {
+	$routes["GET ^https://fb/api/2\.17/file-system-exports\?filter=export_name='(.+)'$"] = {
 		param($r, $m)
-		if ($m.Groups[2].Value -eq 'custom-share') { return @{ items = @(@{ name = 'renamed-fs'; snapshot_directory_enabled = $true }) } }
-		@{ items = @() }
+		# Shaped like Purity//FB 4.8.7. projects-nfs has no export entry, like a release without
+		# file-system-exports, so the file system name fallback is exercised too.
+		$exports = @(
+			@{ export_name = 'custom-share'; policy_type = 'SMB'; member = @{ name = 'renamed-fs' }; server = @{ name = 'srv1' } },
+			@{ export_name = 'custom-share'; policy_type = 'NFS'; member = @{ name = 'other-fs' }; server = @{ name = 'srv1' } },
+			@{ export_name = 'projects-nfs'; policy_type = 'SMB'; member = @{ name = 'unrelated-fs' }; server = @{ name = 'srv1' } },
+			@{ export_name = 'dup-share'; policy_type = 'SMB'; member = @{ name = 'fs-a' }; server = @{ name = 'srv1' } },
+			@{ export_name = 'dup-share'; policy_type = 'SMB'; member = @{ name = 'fs-b' }; server = @{ name = 'srv2' } }
+		)
+		@{ items = @($exports | Where-Object { $_.export_name -eq $m.Groups[1].Value }) }
 	}
 	$routes['POST ^https://fb/api/2\.17/file-system-snapshots\?source_names=(.+)$'] = {
 		param($r, $m)
@@ -159,9 +168,11 @@ function New-LabRoutes {
 	$routes["GET ^https://fb/api/2\.17/file-system-snapshots\?filter=source\.name='(.+)'$"] = {
 		param($r, $m)
 		$src = $m.Groups[1].Value
-		# Model the lab defect: one foreign item slips through, the client must re-check source.name.
+		# Model the lab defect: foreign items slip through, the client must re-check source.name,
+		# including an item that does not name its source at all.
 		$items = @($State.FbSnapshots | Where-Object { $_.source.name -eq $src })
 		$items += , @{ name = 'other-fs.Veeam-Backup-20200101T000000Z'; source = @{ name = 'other-fs' }; destroyed = $false; created = 0 }
+		$items += , @{ name = 'orphan.Veeam-Backup-20200101T000000Z'; destroyed = $false; created = 0 }
 		@{ items = $items }
 	}
 	$routes['GET ^https://fb/api/2\.17/file-system-snapshots\?(?!filter=).*$'] = { @{ items = @($State.FbSnapshots) + @(1..5 | ForEach-Object { @{ name = "noise-$_"; source = @{ name = 'noise' }; destroyed = $false } }) } }

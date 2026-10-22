@@ -65,7 +65,7 @@ function Write-EvpPlan {
 	if ($Config.Veeam.JobId) { Write-Host "Bound job          : $($Config.Veeam.JobId) (job guard on)" }
 	foreach ($a in $Config.Arrays.Values) { Write-Host "Array              : $($a.Name) = $($a.Endpoint) ($($a.Platform), TLS $($a.Tls))" }
 	foreach ($s in $Config.Shares) { Write-Host "Share              : $($s.VeeamPath) [$($s.Protocol)] on $($s.Array), source $($s.Source)" }
-	Write-Host "Snapshot tag       : $($Config.Snapshot.Tag), keep for $(if ($Config.Snapshot.KeepForMs -gt 0) { $Config.Snapshot.KeepFor } else { 'the job run only' }), FlashArray expiry $([int]($Config.Snapshot.ArrayExpiryMs / 86400000))d"
+	Write-Host "Snapshot tag       : $($Config.Snapshot.Tag), keep for $(if ($Config.Snapshot.KeepForMs -gt 0) { $Config.Snapshot.KeepFor } else { 'the job run only' }), FlashArray expiry $([TimeSpan]::FromMilliseconds($Config.Snapshot.ArrayExpiryMs).ToString('d\d\ h\h\ m\m'))"
 	Write-Host "Behaviour          : fail-safe path $($Config.Behaviour.FailSafePath), enforce StorageSnapshot mode $($Config.Behaviour.EnsureProcessingMode)"
 	if ($DryRun) { Write-Host 'Mode               : DRY RUN (-WhatIf), nothing will be changed' }
 }
@@ -191,61 +191,98 @@ function Invoke-EvpPrePhase {
 function Invoke-EvpPostPhase {
 	<#
 	.SYNOPSIS
-		Post-job: destroy the snapshots this tag created on every source of the job.
+		Post-job: disarm the shares, then destroy this tag's snapshots that are older than
+		Snapshot.KeepFor on every source of the job.
 	.DESCRIPTION
-		Destroys every snapshot matching the tag pattern that is older than Snapshot.KeepFor
-		(all of them when KeepFor is 'none'). Veeam is contacted only
-		for the job guard (Veeam.JobId); the shares keep pointing at the destroyed path until the
-		next pre-backup run.
+		Disarming points every share at a non-existent path with failover off. Should the next pre
+		phase fail before it reaches its own fail-safe (Veeam unreachable, script killed by the
+		timeout), the job then fails visibly instead of reading the last snapshot, which a KeepFor
+		retention keeps on purpose. Without Veeam.JobId a failed Veeam connection does not stop the
+		cleanup; with it the job guard needs Veeam, so it does.
 	#>
 	[CmdletBinding(SupportsShouldProcess)]
 	[OutputType([int])]
 	param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Platform)
 
-	$stage = 'Snapshot'
+	$stage = 'Veeam'
+	$veeam = $null
+	$disarmFailed = 0
 	try {
-		if ($Config.Veeam.JobId) {
-			Write-EvpSection 'Veeam'
-			$stage = 'Veeam'
+		Write-EvpSection 'Veeam'
+		try {
 			$veeam = Connect-EvpVeeam -Config $Config -Platform $Platform
-			try { $null = Assert-EvpVeeamJobSession -Session $veeam -Config $Config -Phase 'post' -WarnOnly:$WhatIfPreference }
-			finally { Disconnect-EvpVeeam -Session $veeam }
-			$stage = 'Snapshot'
+		} catch {
+			if ($Config.Veeam.JobId) { throw }
+			Write-Warning "Could not connect to Veeam, so the shares stay pointed at this run's snapshot path: $($_.Exception.Message)"
+			$disarmFailed++
 		}
+		if ($veeam) {
+			$null = Assert-EvpVeeamJobSession -Session $veeam -Config $Config -Phase 'post' -WarnOnly:$WhatIfPreference
+
+			Write-EvpSection 'Disarm shares'
+			$stage = 'Share'
+			$inventory = Get-EvpVeeamShares -Session $veeam
+			$sentinel = Get-EvpSentinelDirectoryName -Reason Disarmed
+			foreach ($share in $Config.Shares) {
+				try {
+					$entry = Find-EvpVeeamShare -Shares $inventory -VeeamPath $share.VeeamPath
+					$path = Get-EvpStorageSnapshotPath -VeeamPath $share.VeeamPath -SnapshotDirectoryName $sentinel -SnapshotRootDirName $Config.Snapshot.SnapshotRootDirName
+					$null = Set-EvpVeeamStorageSnapshotPath -Session $veeam -Share $entry -StorageSnapshotPath $path -EnsureProcessingMode $true -WhatIf:$WhatIfPreference
+				} catch {
+					Write-Warning "Could not disarm '$($share.VeeamPath)': $($_.Exception.Message)"
+					$disarmFailed++
+				}
+			}
+		}
+
 		Write-EvpSection 'Arrays'
+		$stage = 'Array'
 		$plan = Connect-EvpArraysForShares -Config $Config -Platform $Platform -Shares $Config.Shares
+
 		Write-EvpSection 'Destroy snapshots'
+		$stage = 'Snapshot'
 		$keepCutoff = [datetime]::UtcNow.AddMilliseconds(-$Config.Snapshot.KeepForMs)
-		$matched = 0; $destroyed = 0; $failed = 0
+		$tagged = 0; $matched = 0; $destroyed = 0; $failed = 0
 		foreach ($key in $plan.Groups.Keys) {
 			$g = $plan.Groups[$key]
-			$all = Get-EvpArraySnapshots -Session $g.Session -SourceName $g.SourceName
-			$mine = @($all | Where-Object {
-					$ts = Get-EvpSnapshotTimestamp -Name $_.Name -Tag $Config.Snapshot.Tag
-					-not $_.Destroyed -and $ts -and $ts -lt $keepCutoff
-				})
-			Write-Host "$($g.Session.Platform) '$($g.SourceName)': $($mine.Count) snapshot(s) match '$($Config.Snapshot.Tag)'$(if ($Config.Snapshot.KeepForMs -gt 0) { " and are older than $($Config.Snapshot.KeepFor)" })."
-			$matched += $mine.Count
-			if ($mine.Count -gt 0) {
-				$summary = Remove-EvpArraySnapshots -Session $g.Session -Snapshots $mine -WhatIf:$WhatIfPreference
-				$destroyed += $summary.Destroyed; $failed += $summary.Failed
+			try {
+				$all = Get-EvpArraySnapshots -Session $g.Session -SourceName $g.SourceName
+				$withTag = @($all | Where-Object { -not $_.Destroyed -and (Get-EvpSnapshotTimestamp -Name $_.Name -Tag $Config.Snapshot.Tag) })
+				$mine = @($withTag | Where-Object { (Get-EvpSnapshotTimestamp -Name $_.Name -Tag $Config.Snapshot.Tag) -lt $keepCutoff })
+				Write-Host "$($g.Session.Platform) '$($g.SourceName)': $($mine.Count) snapshot(s) match '$($Config.Snapshot.Tag)'$(if ($Config.Snapshot.KeepForMs -gt 0) { " and are older than $($Config.Snapshot.KeepFor)" })."
+				$tagged += $withTag.Count
+				$matched += $mine.Count
+				if ($mine.Count -gt 0) {
+					$summary = Remove-EvpArraySnapshots -Session $g.Session -Snapshots $mine -WhatIf:$WhatIfPreference
+					$destroyed += $summary.Destroyed; $failed += $summary.Failed
+				}
+			} catch {
+				Write-Warning "Cleanup on '$($g.SourceName)' failed: $($_.Exception.Message)"
+				$failed++
 			}
 		}
 		Write-Host ''
-		if ($matched -eq 0) {
+		if ($matched -gt 0) {
+			Write-Host "Destroyed $destroyed snapshot(s); $failed failure(s). Destroyed snapshots stay recoverable until the array's eradication delay expires."
+		} elseif ($tagged -gt 0) {
+			Write-Host "$tagged snapshot(s) carry tag '$($Config.Snapshot.Tag)', none older than $($Config.Snapshot.KeepFor). Nothing to destroy yet."
+		} elseif ($failed -eq 0) {
 			$message = "No snapshots matching tag '$($Config.Snapshot.Tag)' were found on any source. Nothing to clean up."
 			if ($Config.Behaviour.FailIfNoSnapshots) { throw $message }
 			Write-Warning $message
-		} else {
-			Write-Host "Destroyed $destroyed snapshot(s); $failed failure(s). Destroyed snapshots stay recoverable until the array's eradication delay expires."
 		}
+		if ($disarmFailed) { Write-Warning "$disarmFailed share(s) could not be disarmed (see above); they keep pointing at this run's snapshot path." }
 		Write-Host 'Post-backup phase completed.'
-		return $(if ($failed -gt 0) { $script:EvpExitCode.Snapshot } else { $script:EvpExitCode.Success })
+		if ($failed -gt 0) { return $script:EvpExitCode.Snapshot }
+		if ($disarmFailed -gt 0) { return $script:EvpExitCode.Partial }
+		return $script:EvpExitCode.Success
 	} catch {
 		Write-Host ''
 		Write-Host "Post-backup phase FAILED during stage '$stage': $($_.Exception.Message)"
 		Write-Verbose $_.ScriptStackTrace
 		return $script:EvpExitCode[$stage]
+	} finally {
+		if ($veeam) { Disconnect-EvpVeeam -Session $veeam }
 	}
 }
 
@@ -280,6 +317,9 @@ function Invoke-EvpVerifyPhase {
 	$veeam = $null
 	try {
 		$veeam = Connect-EvpVeeam -Config $Config -Platform $Platform
+		if ($veeam.Backend -eq 'Rest' -and $Config.Veeam.Tls -eq 'skip') {
+			Write-Warning "Veeam.Tls 'skip' accepts any certificate, so the Veeam password can be intercepted on the network. Pin the certificate with Veeam.Tls 'thumbprint:<SHA-256>'."
+		}
 		if ($Config.Veeam.JobId) {
 			try {
 				$job = Get-EvpVeeamJob -Session $veeam -JobId $Config.Veeam.JobId
@@ -323,6 +363,9 @@ function Invoke-EvpVerifyPhase {
 			$token = Unprotect-EvpSecret -Path $arrayConfig.ApiTokenFile -Platform $Platform
 			$session = Connect-EvpArray -ArrayConfig $arrayConfig -ApiToken $token
 		} catch { Write-Host "FAIL $($arrayName): $($_.Exception.Message)"; Add-Problem 'Array' $_.Exception.Message; continue }
+		if ($arrayConfig.Tls -eq 'skip') {
+			Write-Warning "$($arrayName): Tls 'skip' accepts any certificate, so the API token can be intercepted on the network. Pin the certificate with Tls 'thumbprint:<SHA-256>'; Protect-EverpureVeeamSecret.ps1 -VerifyOnly prints it."
+		}
 		foreach ($share in @($Config.Shares | Where-Object { $_.Array -eq $arrayName })) {
 			try {
 				$info = Resolve-EvpArraySource -Session $session -Share $share

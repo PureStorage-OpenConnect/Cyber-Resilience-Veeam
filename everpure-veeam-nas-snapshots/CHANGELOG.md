@@ -19,8 +19,9 @@ Initial release.
 - `Invoke-EverpureVeeamNasSnapshot.ps1` with three phases. `pre` creates one tagged and
   timestamped snapshot per array source, points every share of the job at its snapshot path
   with failover to direct backup off, enforces the storage snapshot processing mode and sweeps
-  snapshots carrying the tag that are older than `Snapshot.KeepFor`. `post` (optional) destroys
-  the same set when the job ends. `verify` checks
+  snapshots carrying the tag that are older than `Snapshot.KeepFor`. `post` (optional, highly
+  recommended) points every share at a non-existent path, so a next run whose pre phase fails
+  early fails visibly too, and destroys the same set of snapshots. `verify` checks
   secrets, Veeam access, share resolution, array access and source mapping without changing
   anything.
 - **Job guard.** With `Veeam.JobId` set (the generator fills it in), the pre and post phases run
@@ -36,13 +37,17 @@ Initial release.
   `AcknowledgeRestDefect` setting overrides that once Veeam ships the fix.
 - One JSON-with-comments configuration file per Veeam job (`config.sample.jsonc` documents every
   key). A single `Snapshot.KeepFor` retention (`none`, or a duration such as `7d` or `6h30m`)
-  drives the post phase, the pre-phase sweep and the FlashArray expiry backstop.
+  drives the post phase, the pre-phase sweep and the FlashArray expiry backstop. The snapshot
+  tag defaults to `veeam-<configuration file name>`, so jobs on one array source never sweep
+  each other's snapshots.
 - `Protect-EverpureVeeamSecret.ps1` stores array API tokens and the Veeam password in protected
   files (DPAPI at LocalMachine scope plus ACL on Windows, file permissions on the appliance) and
   verifies them against the target.
 - `New-EverpureVeeamJobScripts.ps1` generates the per-job configuration and the argument-free
   pre and post wrapper scripts the appliance sandbox requires.
-- TLS policies per endpoint, `skip`, `system` and `thumbprint:<SHA-1 or SHA-256>` pinning.
+- TLS policies per endpoint, `skip`, `system` and `thumbprint:<SHA-1 or SHA-256>` pinning. The
+  secret helper prints the array's certificate hash to pin, and the verify phase warns about
+  every endpoint left on `skip`.
 - `-WhatIf` dry run for every phase, exit codes 0 to 6 and 10 for operators and job logs, one
   transcript per run with age-based pruning.
 - Self-contained test suite (`tests/Invoke-Tests.ps1`) with syntax check, unit and integration

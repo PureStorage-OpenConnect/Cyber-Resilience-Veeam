@@ -78,6 +78,12 @@ Assert-Equal 'timestamp is UTC' (Get-EvpSnapshotTimestamp -Name $fa.ArrayName -T
 Assert-Equal 'no timestamp for foreign name' ($null -eq (Get-EvpSnapshotTimestamp -Name 'policy-snap-0001' -Tag 'Veeam-Backup')) 'True'
 Assert-True 'sentinel is unmistakable' ((Get-EvpSentinelDirectoryName) -match '^__everpure-pre-backup-failed-\d{8}T\d{6}Z__$')
 Assert-True 'sentinel does not match the tag pattern' ((Get-EvpSentinelDirectoryName) -notmatch $pattern)
+Assert-True 'disarm sentinel is unmistakable' ((Get-EvpSentinelDirectoryName -Reason Disarmed) -match '^__everpure-awaiting-pre-backup-\d{8}T\d{6}Z__$')
+Assert-Equal 'default tag from profile name' (Get-EvpDefaultSnapshotTag -ProfileName 'lab.files_01') 'veeam-lab-files-01'
+$longTag = Get-EvpDefaultSnapshotTag -ProfileName ('a' * 33 + '-b-c')
+Assert-True 'default tag cut to 40, no trailing dash' ($longTag.Length -le 40 -and $longTag -notmatch '-$' -and $longTag -match '^veeam-a{33}$')
+Assert-Equal 'default tag falls back to the job id' (Get-EvpDefaultSnapshotTag -ProfileName '__' -JobId 'aaaaaaaa-1111-4111-8111-000000000001') 'veeam-aaaaaaaa111141118111000000000001'
+Assert-Equal 'default tag last resort' (Get-EvpDefaultSnapshotTag -ProfileName '__') 'veeam-backup'
 
 # ---------------------------------------------------------------------------------------------
 Write-TestSection 'Get-EvpConfig: defaults and path resolution'
@@ -101,7 +107,7 @@ Assert-Equal 'array platform auto' $c.Arrays['fa'].Platform 'auto'
 Assert-Equal 'share protocol'      $c.Shares[0].Protocol 'SMB'
 Assert-Equal 'share source auto'   $c.Shares[0].Source 'auto'
 Assert-Equal 'explicit source kept' $c.Shares[1].Source 'fs:dir'
-Assert-Equal 'tag default'         $c.Snapshot.Tag 'Veeam-Backup'
+Assert-Equal 'tag default from profile' $c.Snapshot.Tag 'veeam-minimal'
 Assert-Equal 'keep-for default'    $c.Snapshot.KeepFor 'none'
 Assert-Equal 'keep-for default ms' $c.Snapshot.KeepForMs 0
 Assert-Equal 'array expiry = keep-for + 7d' $c.Snapshot.ArrayExpiryMs 604800000
@@ -136,8 +142,14 @@ $path = Write-TestFile -Path (Join-Path $tmp 'jobs/keep.jsonc') -Content '{ "Arr
 $k = Get-EvpConfig -Path $path
 Assert-Equal 'keep-for 7d ms' $k.Snapshot.KeepForMs 604800000
 Assert-Equal 'array expiry 14d' $k.Snapshot.ArrayExpiryMs 1209600000
-$path = Write-TestFile -Path (Join-Path $tmp 'jobs/keep-max.jsonc') -Content '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "KeepFor": "365d" } }'
-Assert-Equal 'array expiry capped at 365d' (Get-EvpConfig -Path $path).Snapshot.ArrayExpiryMs 31536000000
+$path = Write-TestFile -Path (Join-Path $tmp 'jobs/keep-max.jsonc') -Content '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "KeepFor": "358d" } }'
+Assert-Equal 'keep-for 358d: array expiry exactly 365d' (Get-EvpConfig -Path $path).Snapshot.ArrayExpiryMs 31536000000
+Test-ConfigError 'keep-for above 358d' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "KeepFor": "359d" } }' 'at most 358d'
+Test-ConfigError 'keep-for overflow' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "KeepFor": "600000w" } }' 'Snapshot.KeepFor'
+Test-ConfigError 'FailIfNoSnapshots with a keep-for duration' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "KeepFor": "1d" }, "Behaviour": { "FailIfNoSnapshots": true } }' 'FailIfNoSnapshots'
+Test-ConfigError 'thumbprint of impossible length' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t", "Tls": "thumbprint:0123456789012345678901234567890123456789ABCDEFABCD" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'Tls'
+$path = Write-TestFile -Path (Join-Path $tmp 'jobs/explicit-tag.jsonc') -Content '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "Tag": "Veeam-Backup" } }'
+Assert-Equal 'explicit tag wins over the default' (Get-EvpConfig -Path $path).Snapshot.Tag 'Veeam-Backup'
 Test-ConfigError 'user without password' '{ "Veeam": { "User": "x" }, "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'must be set together'
 Test-ConfigError 'bad backend' '{ "Veeam": { "Backend": "soap" }, "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'Veeam.Backend'
 Test-ConfigError 'bad job id' '{ "Veeam": { "JobId": "not-a-guid" }, "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'Veeam.JobId'
@@ -165,6 +177,9 @@ if (Test-IsWindowsHost) {
 	& chmod 0644 $secretPath
 	$report = Test-EvpSecretFile -Path $secretPath -Platform $platform
 	Assert-True 'world-readable warns' ($report.Warnings -join ' ' -match 'world-readable')
+	Protect-EvpSecret -Secret $secret -Path $secretPath -Platform $platform -Group '' 6>$null 3>$null
+	Assert-True 'rewrite restricts a world-readable file to 0640' ((Test-EvpSecretFile -Path $secretPath -Platform $platform).Permissions -like '640 *')
+	Assert-Equal 'rewrite keeps the secret' (ConvertFrom-EvpSecureString (Unprotect-EvpSecret -Path $secretPath -Platform $platform 3>$null)) 'tok-123'
 }
 $plainPath = Write-TestFile -Path (Join-Path $tmp 'secrets/plain.pwd') -Content "pw-with-newline`r`n"
 Assert-Equal 'plain file read, newline trimmed' (ConvertFrom-EvpSecureString (Unprotect-EvpSecret -Path $plainPath -Platform $platform 3>$null)) 'pw-with-newline'
@@ -175,6 +190,11 @@ Assert-Throws 'missing secret file' { Unprotect-EvpSecret -Path (Join-Path $tmp 
 Write-TestFile -Path (Join-Path $tmp 'secrets/empty') -Content '' | Out-Null
 Assert-Throws 'empty secret file' { Unprotect-EvpSecret -Path (Join-Path $tmp 'secrets/empty') -Platform $platform } 'is empty'
 Assert-Equal 'missing file report' (Test-EvpSecretFile -Path (Join-Path $tmp 'nope') -Platform $platform).Exists 'False'
+$unelevated = [pscustomobject]@{ IsWindows = $true; IsLinux = $false; IsElevated = $false; Identity = 'HOST\someone' }
+$lockedOut = Join-Path $tmp 'not-elevated/x.token'
+Assert-Throws 'non-elevated Windows session refused' { Protect-EvpSecret -Secret $secret -Path $lockedOut -Platform $unelevated 6>$null } 'not elevated.*Nothing was written'
+Assert-Equal 'refused before anything was created' (Test-Path (Split-Path $lockedOut)) 'False'
+Assert-True 'elevation is reported on Windows only' ($(if (Test-IsWindowsHost) { $null -ne $platform.IsElevated } else { $null -eq $platform.IsElevated }))
 if (Test-IsWindowsHost) { Write-TestSkipped 'unwritable destination throws' 'needs a path the test user cannot create on Windows' }
 else { Assert-Throws 'unwritable destination throws (module stops on .NET exceptions)' { Protect-EvpSecret -Secret $secret -Path '/nonexistent-root-evp/x/y.token' -Platform $platform -Group '' 6>$null } }
 
@@ -185,6 +205,8 @@ $old = Write-TestFile -Path (Join-Path $logDir 'job-20200101000000-pre.log') -Co
 (Get-Item $old).LastWriteTime = (Get-Date).AddDays(-40)
 $keep = Write-TestFile -Path (Join-Path $logDir 'other-20200101000000-pre.log') -Content 'other profile'
 (Get-Item $keep).LastWriteTime = (Get-Date).AddDays(-40)
+$prefixed = Write-TestFile -Path (Join-Path $logDir 'job-files-20200101000000-pre.log') -Content 'profile sharing the prefix'
+(Get-Item $prefixed).LastWriteTime = (Get-Date).AddDays(-40)
 $logPath = Start-EvpLog -LogDirectory $logDir -ProfileName 'job' -Phase 'pre' -RetentionDays 30 6>$null
 Write-Host 'hello transcript'
 Stop-EvpLog
@@ -192,6 +214,7 @@ Assert-True 'transcript named profile-ts-phase' ((Split-Path -Leaf $logPath) -ma
 Assert-True 'transcript captured output' ((Get-Content $logPath -Raw) -match 'hello transcript')
 Assert-Equal 'old same-profile log pruned' (Test-Path $old) 'False'
 Assert-Equal 'other profile untouched' (Test-Path $keep) 'True'
+Assert-Equal 'profile sharing the name prefix untouched' (Test-Path $prefixed) 'True'
 # On PowerShell 7.6 a caller's $WhatIfPreference reaches module functions. The transcript must
 # still be written, otherwise a dry run leaves no record.
 $WhatIfPreference = $true

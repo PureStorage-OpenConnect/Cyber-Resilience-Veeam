@@ -62,8 +62,10 @@ function Start-EvpLog {
 
 	if ($RetentionDays -gt 0) {
 		$cutoff = (Get-Date).AddDays(-$RetentionDays)
-		$stale = @(Get-ChildItem -LiteralPath $LogDirectory -Filter "$ProfileName-*.log" -File -ErrorAction SilentlyContinue |
-				Where-Object { $_.LastWriteTime -lt $cutoff -and $_.FullName -ne $logPath })
+		# Exact name pattern, not a '<profile>-*' wildcard: profile 'lab' must not prune 'lab-files'.
+		$ownName = '^{0}-\d{{14}}-(pre|post|verify)\.log$' -f [regex]::Escape($ProfileName)
+		$stale = @(Get-ChildItem -LiteralPath $LogDirectory -Filter '*.log' -File -ErrorAction SilentlyContinue |
+				Where-Object { $_.Name -match $ownName -and $_.LastWriteTime -lt $cutoff -and $_.FullName -ne $logPath })
 		foreach ($old in $stale) {
 			try {
 				Remove-Item -LiteralPath $old.FullName -Force -ErrorAction Stop -WhatIf:$false

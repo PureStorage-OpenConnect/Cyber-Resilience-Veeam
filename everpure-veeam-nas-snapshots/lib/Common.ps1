@@ -28,9 +28,13 @@ function Get-EvpPlatform {
 	$onLinux = [bool]$IsLinux
 
 	$identity = 'unknown'
+	$elevated = $null
 	try {
 		if ($onWindows) {
-			$identity = [System.Security.Principal.WindowsIdentity]::GetCurrent().Name
+			$current = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+			$identity = $current.Name
+			# True for an elevated administrator and for LOCAL SYSTEM; false in a UAC-filtered session.
+			$elevated = [System.Security.Principal.WindowsPrincipal]::new($current).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)
 		} else {
 			$identity = [System.Environment]::UserName
 			if ([string]::IsNullOrWhiteSpace($identity)) { $identity = "uid $(& id -u 2>$null)" }
@@ -53,6 +57,7 @@ function Get-EvpPlatform {
 		IsLinux      = $onLinux
 		Name         = if ($onWindows) { 'Windows' } elseif ($onLinux) { 'Linux' } else { 'Other' }
 		Identity     = $identity
+		IsElevated   = $elevated
 		Interactive  = $interactive
 		HomeIsEmpty  = [string]::IsNullOrEmpty($env:HOME)
 		SandboxRoot  = $sandboxRoot
@@ -151,6 +156,7 @@ function Get-EvpConfig {
 	}
 	$raw = Read-EvpJsonFile -Path $fullPath
 	$baseDir = Split-Path -Parent $fullPath
+	$profileName = [System.IO.Path]::GetFileNameWithoutExtension($fullPath)
 	$problems = [System.Collections.Generic.List[string]]::new()
 
 	# --- Veeam -------------------------------------------------------------------------------
@@ -160,7 +166,7 @@ function Get-EvpConfig {
 	if ($backend -notin @('auto', 'PowerShell', 'Rest')) { $problems.Add("Veeam.Backend must be 'auto', 'PowerShell' or 'Rest' (got '$backend').") }
 	$tls = [string](Get-EvpProperty $v 'Tls')
 	if (-not $tls) { $tls = 'skip' }
-	if ($tls -notmatch '^(skip|system|thumbprint:[0-9A-Fa-f]{40,64})$') { $problems.Add("Veeam.Tls must be 'skip', 'system' or 'thumbprint:<hex>' (got '$tls').") }
+	if ($tls -notmatch '^(skip|system|thumbprint:([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64}))$') { $problems.Add("Veeam.Tls must be 'skip', 'system' or 'thumbprint:<hex>' (got '$tls').") }
 	$veeamUser = [string](Get-EvpProperty $v 'User')
 	$veeamPasswordFile = Resolve-EvpConfigPath -Value ([string](Get-EvpProperty $v 'PasswordFile')) -BaseDirectory $baseDir
 	if ([bool]$veeamUser -xor [bool]$veeamPasswordFile) { $problems.Add('Veeam.User and Veeam.PasswordFile must be set together or not at all.') }
@@ -199,7 +205,7 @@ function Get-EvpConfig {
 		if ($platform -notin @('auto', 'FlashArray', 'FlashBlade')) { $problems.Add("Arrays['$name'].Platform must be 'auto', 'FlashArray' or 'FlashBlade'.") }
 		$aTls = [string](Get-EvpProperty $a 'Tls')
 		if (-not $aTls) { $aTls = 'skip' }
-		if ($aTls -notmatch '^(skip|system|thumbprint:[0-9A-Fa-f]{40,64})$') { $problems.Add("Arrays['$name'].Tls must be 'skip', 'system' or 'thumbprint:<hex>'.") }
+		if ($aTls -notmatch '^(skip|system|thumbprint:([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64}))$') { $problems.Add("Arrays['$name'].Tls must be 'skip', 'system' or 'thumbprint:<hex>'.") }
 		$endpoint = [string](Get-EvpProperty $a 'Endpoint')
 		if (-not $endpoint) { $problems.Add("Arrays['$name'] has no Endpoint.") }
 		$tokenFile = Resolve-EvpConfigPath -Value ([string](Get-EvpProperty $a 'ApiTokenFile')) -BaseDirectory $baseDir
@@ -245,20 +251,21 @@ function Get-EvpConfig {
 	# --- Snapshot ----------------------------------------------------------------------------
 	$sn = Get-EvpProperty $raw 'Snapshot'
 	$tag = [string](Get-EvpProperty $sn 'Tag')
-	if (-not $tag) { $tag = 'Veeam-Backup' }
+	if (-not $tag) { $tag = Get-EvpDefaultSnapshotTag -ProfileName $profileName -JobId $veeam.JobId }
 	if ($tag -notmatch '^[A-Za-z0-9-]{1,40}$' -or $tag -notmatch '[A-Za-z]' -or $tag -match '^-|-$') {
 		$problems.Add("Snapshot.Tag '$tag' is invalid: 1 to 40 letters, digits and '-', at least one letter, not starting or ending with '-'. Both arrays enforce this character set.")
 	}
 	# One retention setting. 'none' (default): the post phase destroys the run's snapshots and
 	# the pre phase sweeps whatever an earlier run left behind. A duration keeps every snapshot
-	# of this tag for that long; both phases destroy only older ones.
+	# of this tag for that long; both phases destroy only older ones. At most 358 days, so the
+	# FlashArray backstop below still fits the array's 365-day keep_for limit.
 	$keepFor = Get-EvpProperty $sn 'KeepFor'
 	$keepForText = if ($null -eq $keepFor -or [string]$keepFor -eq '') { 'none' } else { [string]$keepFor }
 	$keepForMs = 0L
-	try { $keepForMs = ConvertTo-EvpMilliseconds -Duration $keepForText } catch { $problems.Add("Snapshot.KeepFor: $($_.Exception.Message)") }
+	try { $keepForMs = ConvertTo-EvpMilliseconds -Duration $keepForText -MaximumMs 30931200000L } catch { $problems.Add("Snapshot.KeepFor: $($_.Exception.Message) KeepFor is at most 358d, so the FlashArray backstop of KeepFor plus 7 days fits the array's 365-day limit.") }
 	# FlashArray backstop expiry (keep_for) in case neither phase ever runs again: retention plus
-	# a week, capped at the array's 365-day maximum. FlashBlade has no per-snapshot expiry.
-	$arrayExpiryMs = [Math]::Min($keepForMs + 604800000L, 31536000000L)
+	# a week. FlashBlade has no per-snapshot expiry.
+	$arrayExpiryMs = $keepForMs + 604800000L
 	$root = [string](Get-EvpProperty $sn 'SnapshotRootDirName')
 	if (-not $root) { $root = '.snapshot' }
 	$snapshot = [ordered]@{
@@ -280,6 +287,9 @@ function Get-EvpConfig {
 		EnsureProcessingMode = if ($null -ne $ensureMode) { [bool]$ensureMode } else { $true }
 		FailIfNoSnapshots    = if ($null -ne $failIfNone) { [bool]$failIfNone } else { $false }
 	}
+	if ($behaviour.FailIfNoSnapshots -and $keepForMs -gt 0) {
+		$problems.Add('Behaviour.FailIfNoSnapshots cannot be combined with a Snapshot.KeepFor duration: the post phase then normally finds nothing old enough to destroy, and every run would fail.')
+	}
 
 	# --- Logging -----------------------------------------------------------------------------
 	$l = Get-EvpProperty $raw 'Logging'
@@ -296,7 +306,7 @@ function Get-EvpConfig {
 	return [ordered]@{
 		ConfigPath      = $fullPath
 		ConfigDirectory = $baseDir
-		ProfileName     = [System.IO.Path]::GetFileNameWithoutExtension($fullPath)
+		ProfileName     = $profileName
 		Veeam           = $veeam
 		Arrays          = $arrays
 		Shares          = $shares
@@ -429,6 +439,29 @@ function Get-EvpTimestamp {
 	return $Time.ToUniversalTime().ToString('yyyyMMdd\THHmmss\Z')
 }
 
+function Get-EvpDefaultSnapshotTag {
+	<#
+	.SYNOPSIS
+		Default Snapshot.Tag: 'veeam-' plus the profile name, reduced to the tag character set.
+	.DESCRIPTION
+		Gives every job configuration its own tag, so two jobs on one array source never sweep or
+		destroy each other's snapshots. Anything but letters and digits becomes '-', runs of '-'
+		collapse, and the result is cut to the 40-character tag limit. When the profile name
+		leaves nothing usable, the job ID (without dashes) is used, and failing that 'veeam-backup'.
+	#>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param([string] $ProfileName, [string] $JobId)
+	foreach ($candidate in $ProfileName, ($JobId -replace '-', '')) {
+		$escaped = ($candidate -replace '[^A-Za-z0-9]+', '-').Trim('-')
+		if ($escaped) {
+			$tag = "veeam-$escaped"
+			return $tag.Substring(0, [Math]::Min(40, $tag.Length)).TrimEnd('-')
+		}
+	}
+	return 'veeam-backup'
+}
+
 function New-EvpSnapshotName {
 	<#
 	.SYNOPSIS
@@ -498,11 +531,18 @@ function Get-EvpSnapshotTimestamp {
 }
 
 function Get-EvpSentinelDirectoryName {
-	<# Deliberately non-existent snapshot directory used by the fail-safe. #>
+	<#
+	.SYNOPSIS
+		Deliberately non-existent snapshot directory that makes the next job run fail visibly.
+	.PARAMETER Reason
+		PreFailed: the fail-safe of a failed pre phase. Disarmed: set by the post phase, so a job
+		whose next pre phase never gets as far as the fail-safe cannot read the last snapshot.
+	#>
 	[CmdletBinding()]
 	[OutputType([string])]
-	param([string] $Timestamp = (Get-EvpTimestamp))
-	return '__everpure-pre-backup-failed-{0}__' -f $Timestamp
+	param([string] $Timestamp = (Get-EvpTimestamp), [ValidateSet('PreFailed', 'Disarmed')] [string] $Reason = 'PreFailed')
+	$label = if ($Reason -eq 'Disarmed') { 'awaiting-pre-backup' } else { 'pre-backup-failed' }
+	return '__everpure-{0}-{1}__' -f $label, $Timestamp
 }
 
 #endregion

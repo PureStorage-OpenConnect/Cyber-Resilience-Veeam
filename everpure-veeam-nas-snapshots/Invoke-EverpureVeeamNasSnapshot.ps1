@@ -26,9 +26,11 @@
 	        were resolved, every share is pointed at a non-existent sentinel path so the job
 	        fails visibly instead of backing up stale or live data (Veeam only warns when a
 	        pre-job script fails).
-	post    Destroys the snapshots carrying this configuration's tag that are older than
-	        Snapshot.KeepFor on every source. Optional: without it, snapshots stay until the
-	        next pre phase sweeps them.
+	post    Points every share at a non-existent path (disarm), then destroys the snapshots
+	        carrying this configuration's tag that are older than Snapshot.KeepFor on every
+	        source. Optional but highly recommended: without it a next run whose pre phase fails
+	        before its fail-safe (Veeam unreachable, script killed) backs up the last snapshot
+	        again and reports success, and snapshots stay until the next pre phase sweeps them.
 	verify  Checks secrets, Veeam access, share resolution, array access and source mapping
 	        without changing anything. Run it after installation and after every config change.
 
@@ -63,7 +65,8 @@
 
 .NOTES
 	Exit codes: 0 success, 1 configuration, 2 Veeam connection, 3 share resolution or update,
-	4 array connection, 5 snapshot create or destroy, 6 partial success, 10 failure with the
+	4 array connection, 5 snapshot create or destroy, 6 partial success (sweep or disarm
+	failures, see the log), 10 failure with the
 	fail-safe path applied. Veeam treats any non-zero code as a warning and runs the job.
 
 	Version: ModuleVersion in EverpureVeeamNas.psd1 (semantic versioning), printed at the start

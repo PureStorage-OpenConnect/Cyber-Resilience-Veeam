@@ -64,13 +64,13 @@ Export-ModuleMember -Function @(
 	# Common
 	'Get-EvpPlatform', 'Initialize-EvpEnvironment', 'Get-EvpConfig', 'ConvertTo-EvpMilliseconds',
 	'Get-EvpShareProtocol', 'Split-EvpSharePath', 'Get-EvpNormalizedSharePath', 'Get-EvpStorageSnapshotPath',
-	'Get-EvpTimestamp', 'New-EvpSnapshotName', 'Get-EvpSnapshotMatchPattern', 'Get-EvpSnapshotTimestamp', 'Get-EvpSentinelDirectoryName',
+	'Get-EvpTimestamp', 'Get-EvpDefaultSnapshotTag', 'New-EvpSnapshotName', 'Get-EvpSnapshotMatchPattern', 'Get-EvpSnapshotTimestamp', 'Get-EvpSentinelDirectoryName',
 	# Secrets
-	'ConvertFrom-EvpSecureString', 'Protect-EvpSecret', 'Unprotect-EvpSecret', 'Test-EvpSecretFile',
+	'ConvertFrom-EvpSecureString', 'Assert-EvpSecretWriter', 'Protect-EvpSecret', 'Unprotect-EvpSecret', 'Test-EvpSecretFile',
 	# Logging
 	'Get-EvpDefaultLogDirectory', 'Start-EvpLog', 'Stop-EvpLog', 'Write-EvpSection',
 	# Http
-	'Set-EvpHttpInvoker', 'Invoke-EvpHttp', 'Get-EvpHttpErrorText',
+	'Set-EvpHttpInvoker', 'Invoke-EvpHttp', 'Get-EvpHttpErrorText', 'Get-EvpServerCertificateHash',
 	# Veeam
 	'Connect-EvpVeeam', 'Disconnect-EvpVeeam', 'Test-EvpVeeamModule', 'Get-EvpVeeamShares', 'Find-EvpVeeamShare', 'Set-EvpVeeamStorageSnapshotPath',
 	'Get-EvpVeeamJob', 'Get-EvpVeeamActiveJobSessions', 'Assert-EvpVeeamJobSession',

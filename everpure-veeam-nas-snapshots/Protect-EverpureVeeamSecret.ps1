@@ -29,8 +29,9 @@
 
 	Windows: run from an elevated PowerShell (Run as administrator). The ACL leaves only SYSTEM
 	and Administrators, and a non-elevated session carries a UAC-filtered token in which the
-	Administrators group is deny-only, so -Verify and -VerifyOnly fail with access denied
-	when reading the file back. Linux: no root needed to verify; the owner can read the 0640
+	Administrators group is deny-only. Such a session could write the file but never read it
+	back, so the helper refuses it before asking for the secret and writes nothing. -VerifyOnly
+	in a non-elevated session fails with access denied. Linux: no root needed to verify; the owner can read the 0640
 	file. Only chgrp veeam-grp-data needs root or membership in that group (a warning is
 	printed when it fails).
 
@@ -108,10 +109,12 @@ if (($Verify -or $VerifyOnly) -and -not $isToken -and -not $VBRUser) { throw 'Sp
 Write-Host ''
 Write-Host "Secret type : $SecretType"
 Write-Host "File        : $fullPath"
-Write-Host "Platform    : $($platform.Name), running as $($platform.Identity)"
+Write-Host "Platform    : $($platform.Name), running as $($platform.Identity)$(if ($platform.IsWindows) { $(if ($platform.IsElevated) { ' (elevated)' } else { ' (not elevated)' }) })"
 Write-Host ''
 
 if (-not $VerifyOnly) {
+	# Before the overwrite question and the secret prompt, not after them.
+	Assert-EvpSecretWriter -Platform $platform
 	if ((Test-Path -LiteralPath $fullPath -PathType Leaf) -and -not $Force) {
 		$answer = Read-Host "File '$fullPath' exists. Overwrite? [y/N]"
 		if ($answer -notmatch '^[Yy]') { throw 'Aborted; the existing file was left untouched. Use -Force to overwrite, or -VerifyOnly to test it.' }
@@ -138,6 +141,14 @@ if ($Verify -or $VerifyOnly) {
 		$session = Connect-EvpArray -ArrayConfig $arrayConfig -ApiToken $stored
 		Write-Host ''
 		Write-Host "Verification succeeded: $($session.Platform) '$($session.ArrayName)', Purity $($session.PurityVersion), REST $($session.ApiVersion)."
+		if ($Tls -eq 'skip') {
+			try {
+				$hash = Get-EvpServerCertificateHash -ComputerName $Endpoint
+				Write-Host "Certificate : SHA-256 $hash"
+				Write-Host "              Compare it with the certificate shown on the array, then pin it with"
+				Write-Host "              `"Tls`": `"thumbprint:$hash`" in Arrays[] so the token cannot be intercepted."
+			} catch { Write-Warning $_.Exception.Message }
+		}
 	} else {
 		$config = [ordered]@{ Veeam = [ordered]@{ Backend = 'PowerShell'; Server = $VBRServer; Port = 9419; User = $VBRUser; PasswordFile = $fullPath; Tls = $Tls; ForceAcceptTlsCertificate = $true; ApiVersion = '1.3-rev2'; AcknowledgeRestDefect = $false } }
 		if (-not (Test-EvpVeeamModule)) { $config.Veeam.Backend = 'Rest' }

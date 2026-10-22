@@ -10,7 +10,8 @@
 	              share -> managed directory through directory-exports (filtered by protocol,
 	              because one export name can exist once per SMB and once per NFS policy).
 	  FlashBlade  file-system-snapshots with suffix only (retention lives in policies);
-	              share -> file system by name, then by smb.share_name / nfs.export_name.
+	              share -> file system through file-system-exports (export_name and
+	              policy_type), then by file system name for releases without exports.
 	              FlashBlade ignores unknown query parameters silently (source_names returned
 	              every snapshot on the array in the lab), so listing always uses filter= and
 	              every item's source.name is re-checked before it is destroyed.
@@ -153,15 +154,44 @@ function Resolve-EvpArraySource {
 		if ($dirs.Count -gt 1) { throw "FlashArray export '$shareName' maps to $($dirs.Count) directories ($($dirs -join ', ')); set Shares[].Source explicitly." }
 		return (Get-EvpArraySourceInfo -Session $Session -SourceName $dirs[0])
 	}
-	# FlashBlade: the file system name is the default share/export name; explicit names override.
-	$fs = @(Invoke-EvpArrayApi -Session $Session -Path 'file-systems' -Query @{ names = $shareName } -ErrorAction SilentlyContinue)
-	if ($fs.Count -eq 0) {
-		$field = if ($Share.Protocol -eq 'SMB') { 'smb.share_name' } else { 'nfs.export_name' }
-		$fs = @(Invoke-EvpArrayApi -Session $Session -Path 'file-systems' -Query @{ filter = "$field='$shareName'" })
+	# FlashBlade: the share is an export, and its member is the file system whatever the export is
+	# called (Purity//FB 4.8.7 in the lab: 20 of 142 exports differ from their file system name).
+	# The export is looked up first because an export name can equal another file system's name.
+	# Releases without file-system-exports name the export after the file system.
+	$exportFilter = 'export_name={0}' -f (ConvertTo-EvpFilterLiteral -Value $shareName)
+	$exports = @()
+	try { $exports = @(Invoke-EvpArrayApi -Session $Session -Path 'file-system-exports' -Query @{ filter = $exportFilter }) }
+	catch { Write-Verbose "file-system-exports not available, using the file system name: $($_.Exception.Message)" }
+	$members = @($exports | Where-Object { [string]$_.policy_type -eq $Share.Protocol } | ForEach-Object { [string]$_.member.name } | Where-Object { $_ } | Sort-Object -Unique)
+	if ($members.Count -gt 1) {
+		throw "FlashBlade $($Share.Protocol) export '$shareName' exists for $($members.Count) file systems ($($members -join ', ')) on different servers; set Shares[].Source explicitly."
 	}
-	if ($fs.Count -eq 0) { throw "FlashBlade '$($Session.Endpoint)' has no file system named or exported as '$shareName'." }
-	if ($fs.Count -gt 1) { throw "FlashBlade share '$shareName' matches $($fs.Count) file systems; set Shares[].Source explicitly." }
+	$fsName = if ($members.Count -eq 1) { $members[0] } else { $shareName }
+	# An unknown name is an error response (HTTP 400 "File system does not exist."), not an empty
+	# list. Caught here rather than with -ErrorAction SilentlyContinue, which also silences the
+	# throw and lets the error body through as if it were a file system.
+	$fs = @()
+	try { $fs = @(Invoke-EvpArrayApi -Session $Session -Path 'file-systems' -Query @{ names = $fsName }) }
+	catch { Write-Verbose "No file system named '$fsName': $($_.Exception.Message)" }
+	if ($fs.Count -eq 0) { throw "FlashBlade '$($Session.Endpoint)' has no file system named or exported ($($Share.Protocol)) as '$shareName'." }
 	return (ConvertTo-EvpSourceInfo -Session $Session -Item $fs[0])
+}
+
+function ConvertTo-EvpFilterLiteral {
+	<#
+	.SYNOPSIS
+		Quotes a value for a FlashBlade filter= expression, refusing a value that contains a quote.
+	.DESCRIPTION
+		The filter language has no documented escape for a single quote, and a quote would end the
+		literal early and change what the expression matches.
+	#>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param([Parameter(Mandatory)] [string] $Value)
+	if ($Value.Contains("'")) {
+		throw "'$Value' contains a single quote, which a FlashBlade filter cannot express. Set Shares[].Source to the file system name explicitly."
+	}
+	return "'$Value'"
 }
 
 function Get-EvpArraySourceInfo {
@@ -234,11 +264,12 @@ function Get-EvpArraySnapshots {
 	if ($Session.Platform -eq 'FlashArray') {
 		$items = @(Invoke-EvpArrayApi -Session $Session -Path 'directory-snapshots' -Query @{ source_names = $SourceName })
 	} else {
-		$items = @(Invoke-EvpArrayApi -Session $Session -Path 'file-system-snapshots' -Query @{ filter = "source.name='$SourceName'" })
+		$items = @(Invoke-EvpArrayApi -Session $Session -Path 'file-system-snapshots' -Query @{ filter = 'source.name={0}' -f (ConvertTo-EvpFilterLiteral -Value $SourceName) })
 	}
 	$records = foreach ($i in $items) {
+		# Fail closed: an item that does not name its source is never a candidate for destruction.
 		$src = [string]$i.source.name
-		if ($src -and $src -ne $SourceName) { Write-Verbose "Ignoring snapshot '$($i.name)' of other source '$src'."; continue }
+		if ($src -ne $SourceName) { Write-Verbose "Ignoring snapshot '$($i.name)' (source '$src', expected '$SourceName')."; continue }
 		[pscustomobject]@{
 			Name       = [string]$i.name
 			SourceName = $src
