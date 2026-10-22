@@ -22,11 +22,13 @@
 .DESCRIPTION
 	pre     Creates one snapshot per array source used by the job's shares, points every share
 	        (SMB or NFS) at its snapshot path with direct-backup failover off, and sweeps
-	        snapshots older than Snapshot.SweepOlderThan. If anything fails after the shares
+	        snapshots older than Snapshot.KeepFor. If anything fails after the shares
 	        were resolved, every share is pointed at a non-existent sentinel path so the job
 	        fails visibly instead of backing up stale or live data (Veeam only warns when a
 	        pre-job script fails).
-	post    Destroys the snapshots carrying this configuration's tag on every source.
+	post    Destroys the snapshots carrying this configuration's tag that are older than
+	        Snapshot.KeepFor on every source. Optional: without it, snapshots stay until the
+	        next pre phase sweeps them.
 	verify  Checks secrets, Veeam access, share resolution, array access and source mapping
 	        without changing anything. Run it after installation and after every config change.
 

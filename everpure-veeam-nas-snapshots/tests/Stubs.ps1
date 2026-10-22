@@ -316,7 +316,7 @@ function New-LabConfigFile {
 			[ordered]@{ VeeamPath = '192.0.2.10:/shared'; Array = 'fa' },
 			[ordered]@{ VeeamPath = '192.0.2.20:/projects-nfs'; Array = 'fb' }
 		)
-		Snapshot  = [ordered]@{ Tag = 'Veeam-Backup'; Lifetime = '4h'; SweepOlderThan = '1d' }
+		Snapshot  = [ordered]@{ Tag = 'Veeam-Backup'; KeepFor = '1d' }
 		Behaviour = [ordered]@{}
 		Logging   = [ordered]@{ Directory = 'log'; RetentionDays = 1 }
 	}

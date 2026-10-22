@@ -65,7 +65,7 @@ function Write-EvpPlan {
 	if ($Config.Veeam.JobId) { Write-Host "Bound job          : $($Config.Veeam.JobId) (job guard on)" }
 	foreach ($a in $Config.Arrays.Values) { Write-Host "Array              : $($a.Name) = $($a.Endpoint) ($($a.Platform), TLS $($a.Tls))" }
 	foreach ($s in $Config.Shares) { Write-Host "Share              : $($s.VeeamPath) [$($s.Protocol)] on $($s.Array), source $($s.Source)" }
-	Write-Host "Snapshot tag       : $($Config.Snapshot.Tag), lifetime $($Config.Snapshot.Lifetime) (FlashArray only), sweep older than $($Config.Snapshot.SweepOlderThan)"
+	Write-Host "Snapshot tag       : $($Config.Snapshot.Tag), keep for $(if ($Config.Snapshot.KeepForMs -gt 0) { $Config.Snapshot.KeepFor } else { 'the job run only' }), FlashArray expiry $([int]($Config.Snapshot.ArrayExpiryMs / 86400000))d"
 	Write-Host "Behaviour          : fail-safe path $($Config.Behaviour.FailSafePath), enforce StorageSnapshot mode $($Config.Behaviour.EnsureProcessingMode)"
 	if ($DryRun) { Write-Host 'Mode               : DRY RUN (-WhatIf), nothing will be changed' }
 }
@@ -119,7 +119,7 @@ function Invoke-EvpPrePhase {
 		$created = @{}
 		foreach ($key in $plan.Groups.Keys) {
 			$g = $plan.Groups[$key]
-			$keepFor = if ($g.Session.Platform -eq 'FlashArray') { $Config.Snapshot.LifetimeMs } else { 0 }
+			$keepFor = if ($g.Session.Platform -eq 'FlashArray') { $Config.Snapshot.ArrayExpiryMs } else { 0 }
 			$created[$key] = New-EvpArraySnapshot -Session $g.Session -SourceName $g.SourceName -Tag $Config.Snapshot.Tag -Timestamp $timestamp -KeepForMs $keepFor -WhatIf:$WhatIfPreference
 		}
 
@@ -132,28 +132,28 @@ function Invoke-EvpPrePhase {
 			$r.Applied = Set-EvpVeeamStorageSnapshotPath -Session $veeam -Share $r.Inventory -StorageSnapshotPath $path -EnsureProcessingMode $Config.Behaviour.EnsureProcessingMode -WhatIf:$WhatIfPreference
 		}
 
-		if ($Config.Snapshot.SweepOlderThanMs -gt 0) {
-			Write-EvpSection "Sweep snapshots older than $($Config.Snapshot.SweepOlderThan)"
-			$stage = 'Snapshot'
-			$cutoff = [datetime]::UtcNow.AddMilliseconds(-$Config.Snapshot.SweepOlderThanMs)
-			$sweepFailed = 0
-			foreach ($key in $plan.Groups.Keys) {
-				$g = $plan.Groups[$key]
-				try {
-					$all = Get-EvpArraySnapshots -Session $g.Session -SourceName $g.SourceName
-					$old = @($all | Where-Object {
-							$ts = Get-EvpSnapshotTimestamp -Name $_.Name -Tag $Config.Snapshot.Tag
-							$ts -and $ts -lt $cutoff -and $_.Name -ne $created[$key].ArrayName -and -not $_.Destroyed
-						})
-					Write-Host "$($g.Session.Platform) '$($g.SourceName)': $($all.Count) snapshot(s), $($old.Count) matching '$($Config.Snapshot.Tag)' and older than the cut-off."
-					if ($old.Count -gt 0) {
-						$summary = Remove-EvpArraySnapshots -Session $g.Session -Snapshots $old -WhatIf:$WhatIfPreference
-						$sweepFailed += $summary.Failed
-					}
-				} catch {
-					Write-Warning "Sweep on '$($g.SourceName)' failed: $($_.Exception.Message)"
-					$sweepFailed++
+		# Sweep: tagged snapshots older than KeepFor (all of them when KeepFor is 'none'), except
+		# the one just created. Catches whatever a missed post phase left behind.
+		Write-EvpSection "Sweep snapshots$(if ($Config.Snapshot.KeepForMs -gt 0) { " older than $($Config.Snapshot.KeepFor)" } else { ' of earlier runs' })"
+		$stage = 'Snapshot'
+		$cutoff = [datetime]::UtcNow.AddMilliseconds(-$Config.Snapshot.KeepForMs)
+		$sweepFailed = 0
+		foreach ($key in $plan.Groups.Keys) {
+			$g = $plan.Groups[$key]
+			try {
+				$all = Get-EvpArraySnapshots -Session $g.Session -SourceName $g.SourceName
+				$old = @($all | Where-Object {
+						$ts = Get-EvpSnapshotTimestamp -Name $_.Name -Tag $Config.Snapshot.Tag
+						$ts -and $ts -lt $cutoff -and $_.Name -ne $created[$key].ArrayName -and -not $_.Destroyed
+					})
+				Write-Host "$($g.Session.Platform) '$($g.SourceName)': $($all.Count) snapshot(s), $($old.Count) matching '$($Config.Snapshot.Tag)' and older than the cut-off."
+				if ($old.Count -gt 0) {
+					$summary = Remove-EvpArraySnapshots -Session $g.Session -Snapshots $old -WhatIf:$WhatIfPreference
+					$sweepFailed += $summary.Failed
 				}
+			} catch {
+				Write-Warning "Sweep on '$($g.SourceName)' failed: $($_.Exception.Message)"
+				$sweepFailed++
 			}
 		}
 
@@ -193,8 +193,8 @@ function Invoke-EvpPostPhase {
 	.SYNOPSIS
 		Post-job: destroy the snapshots this tag created on every source of the job.
 	.DESCRIPTION
-		Destroys every snapshot matching the tag pattern, except those younger than
-		Behaviour.PostKeepYoungerThan (for two jobs sharing one source). Veeam is contacted only
+		Destroys every snapshot matching the tag pattern that is older than Snapshot.KeepFor
+		(all of them when KeepFor is 'none'). Veeam is contacted only
 		for the job guard (Veeam.JobId); the shares keep pointing at the destroyed path until the
 		next pre-backup run.
 	#>
@@ -215,16 +215,16 @@ function Invoke-EvpPostPhase {
 		Write-EvpSection 'Arrays'
 		$plan = Connect-EvpArraysForShares -Config $Config -Platform $Platform -Shares $Config.Shares
 		Write-EvpSection 'Destroy snapshots'
-		$keepCutoff = if ($Config.Behaviour.PostKeepYoungerThanMs -gt 0) { [datetime]::UtcNow.AddMilliseconds(-$Config.Behaviour.PostKeepYoungerThanMs) } else { $null }
+		$keepCutoff = [datetime]::UtcNow.AddMilliseconds(-$Config.Snapshot.KeepForMs)
 		$matched = 0; $destroyed = 0; $failed = 0
 		foreach ($key in $plan.Groups.Keys) {
 			$g = $plan.Groups[$key]
 			$all = Get-EvpArraySnapshots -Session $g.Session -SourceName $g.SourceName
 			$mine = @($all | Where-Object {
 					$ts = Get-EvpSnapshotTimestamp -Name $_.Name -Tag $Config.Snapshot.Tag
-					-not $_.Destroyed -and $ts -and (-not $keepCutoff -or $ts -lt $keepCutoff)
+					-not $_.Destroyed -and $ts -and $ts -lt $keepCutoff
 				})
-			Write-Host "$($g.Session.Platform) '$($g.SourceName)': $($mine.Count) snapshot(s) match '$($Config.Snapshot.Tag)'$(if ($keepCutoff) { " and are older than $($Config.Behaviour.PostKeepYoungerThan)" })."
+			Write-Host "$($g.Session.Platform) '$($g.SourceName)': $($mine.Count) snapshot(s) match '$($Config.Snapshot.Tag)'$(if ($Config.Snapshot.KeepForMs -gt 0) { " and are older than $($Config.Snapshot.KeepFor)" })."
 			$matched += $mine.Count
 			if ($mine.Count -gt 0) {
 				$summary = Remove-EvpArraySnapshots -Session $g.Session -Snapshots $mine -WhatIf:$WhatIfPreference

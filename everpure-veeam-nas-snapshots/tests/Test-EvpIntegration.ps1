@@ -207,7 +207,7 @@ Assert-True 'FB NFS path carries fs name' ($fbSet.StorageSnapshotPath -match '^1
 Assert-True 'all failover off' (-not ($sets | Where-Object { $_.Failover -ne $false }))
 Assert-True 'all mode enforced' (-not ($sets | Where-Object { $_.Mode -ne 'StorageSnapshot' }))
 $faPost = $posts | Where-Object Uri -like 'https://fa/*' | Select-Object -First 1
-Assert-Equal 'FA keep_for from Lifetime 4h' $faPost.Body.keep_for 14400000
+Assert-Equal 'FA keep_for = KeepFor 1d + 7d' $faPost.Body.keep_for 691200000
 $fbPost = $posts | Where-Object Uri -like 'https://fb/*' | Select-Object -First 1
 Assert-True 'FB no keep_for' ($fbPost.Body.PSObject.Properties.Name -notcontains 'keep_for')
 
@@ -279,7 +279,7 @@ $jobId = 'aaaaaaaa-1111-4111-8111-000000000001'
 $otherId = 'bbbbbbbb-2222-4222-8222-000000000002'
 $labRoots = @('\\192.0.2.10\finance-smb', '\\192.0.2.10\shared', '192.0.2.10:/shared', '192.0.2.20:/projects-nfs')
 $env:EVP_TEST_JOBS = ConvertTo-Json -Compress -Depth 4 -InputObject @(@{ Id = $jobId; Name = 'lab-job'; ShareRoots = $labRoots })
-$bound = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'bound') -Overrides @{ Veeam = @{ JobId = $jobId.ToUpperInvariant() } })
+$bound = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'bound') -Overrides @{ Veeam = @{ JobId = $jobId.ToUpperInvariant() }; Snapshot = @{ KeepFor = 'none' } })
 Assert-Equal 'JobId parsed and lower-cased' $bound.Veeam.JobId $jobId
 # Only a clone's own session is active: the pre phase stops before touching anything.
 $env:EVP_TEST_SESSIONS = ConvertTo-Json -Compress -InputObject @(@{ Id = 'cccccccc-3333-4333-8333-000000000003'; JobId = $otherId; Name = 'lab-job'; State = 'Working' })
@@ -373,7 +373,7 @@ $state.FaSnapshots = @(
 	@{ name = "fs01:finance-smb.Veeam-Backup.$(Get-EvpTimestamp)"; source = @{ name = 'fs01:finance-smb' }; destroyed = $false }
 )
 Use-LabMock $state; Reset-Logs
-$keep = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'keep') -Overrides @{ Behaviour = @{ PostKeepYoungerThan = '1h' } })
+$keep = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'keep') -Overrides @{ Snapshot = @{ KeepFor = '1h' } })
 $rc = Invoke-EvpPostPhase -Config $keep -Platform $platform 6>$null 3>$null
 Assert-Equal 'young snapshot kept' @(Get-HttpCalls | Where-Object Method -eq 'PATCH').Count 1
 Reset-Logs

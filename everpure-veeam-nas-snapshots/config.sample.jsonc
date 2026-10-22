@@ -75,14 +75,14 @@
 		// snapshots by this tag, so give every job its own tag if jobs share a source.
 		"Tag": "Veeam-Backup",
 
-		// FlashArray only: backstop expiry (keep_for) in case the post phase never runs.
-		// '7d', '48h', '6h30m', ... between 5m and 365d, or 'none'. FlashBlade has no
-		// per-snapshot expiry; its leftovers are removed by the sweep below.
-		"Lifetime": "7d",
-
-		// Pre phase: destroy snapshots with this tag that are older than this. 'none' disables.
-		// Keep it well above the longest job runtime when two jobs share a source.
-		"SweepOlderThan": "2d",
+		// How long snapshots of this tag stay on the arrays. 'none': the post phase destroys the
+		// run's snapshots when the job ends, and the pre phase sweeps whatever an earlier run
+		// left behind (a stopped job never runs the post script). A duration such as '7d',
+		// '48h' or '6h30m' keeps every snapshot that long instead; both phases destroy only
+		// older ones, so the last days of backups stay browsable under .snapshot on the share.
+		// FlashArray snapshots also get an expiry of KeepFor plus 7 days as a backstop in case
+		// the scripts never run again; FlashBlade has no per-snapshot expiry.
+		"KeepFor": "none",
 
 		// Where the arrays expose snapshots inside a share. Rarely anything else.
 		"SnapshotRootDirName": ".snapshot"
@@ -98,12 +98,9 @@
 		// Required for the path (and the fail-safe) to have any effect; leave it on.
 		"EnsureProcessingMode": true,
 
-		// Post phase: exit non-zero when nothing matched the tag. Off: nothing to clean up is normal.
-		"FailIfNoSnapshots": false,
-
-		// Post phase: keep snapshots younger than this (another job may be reading them). 'none'
-		// destroys every snapshot carrying the tag.
-		"PostKeepYoungerThan": "none"
+		// Post phase: exit non-zero when nothing matched the tag. Off: nothing to clean up is normal
+		// (always the case with a KeepFor retention).
+		"FailIfNoSnapshots": false
 	},
 
 	"Logging": {

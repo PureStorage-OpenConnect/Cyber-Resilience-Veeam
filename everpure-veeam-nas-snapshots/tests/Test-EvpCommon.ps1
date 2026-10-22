@@ -102,11 +102,11 @@ Assert-Equal 'share protocol'      $c.Shares[0].Protocol 'SMB'
 Assert-Equal 'share source auto'   $c.Shares[0].Source 'auto'
 Assert-Equal 'explicit source kept' $c.Shares[1].Source 'fs:dir'
 Assert-Equal 'tag default'         $c.Snapshot.Tag 'Veeam-Backup'
-Assert-Equal 'lifetime default ms' $c.Snapshot.LifetimeMs 604800000
-Assert-Equal 'sweep default ms'    $c.Snapshot.SweepOlderThanMs 172800000
+Assert-Equal 'keep-for default'    $c.Snapshot.KeepFor 'none'
+Assert-Equal 'keep-for default ms' $c.Snapshot.KeepForMs 0
+Assert-Equal 'array expiry = keep-for + 7d' $c.Snapshot.ArrayExpiryMs 604800000
 Assert-Equal 'fail-safe default'   $c.Behaviour.FailSafePath 'True'
 Assert-Equal 'ensure mode default' $c.Behaviour.EnsureProcessingMode 'True'
-Assert-Equal 'post keep default'   $c.Behaviour.PostKeepYoungerThanMs 0
 Assert-Equal 'log retention default' $c.Logging.RetentionDays 30
 Assert-Equal 'log dir default null' ($null -eq $c.Logging.Directory) 'True'
 
@@ -131,7 +131,13 @@ Test-ConfigError 'duplicate share' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e
 Test-ConfigError 'no token file' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'has no ApiTokenFile'
 Test-ConfigError 'bad tag (dot)' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "Tag": "Veeam.Backup" } }' 'Snapshot.Tag'
 Test-ConfigError 'bad tag (numeric)' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "Tag": "12345" } }' 'Snapshot.Tag'
-Test-ConfigError 'bad lifetime' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "Lifetime": "1m" } }' 'Snapshot.Lifetime'
+Test-ConfigError 'bad keep-for' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "KeepFor": "7" } }' 'Snapshot.KeepFor'
+$path = Write-TestFile -Path (Join-Path $tmp 'jobs/keep.jsonc') -Content '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "KeepFor": "7d" } }'
+$k = Get-EvpConfig -Path $path
+Assert-Equal 'keep-for 7d ms' $k.Snapshot.KeepForMs 604800000
+Assert-Equal 'array expiry 14d' $k.Snapshot.ArrayExpiryMs 1209600000
+$path = Write-TestFile -Path (Join-Path $tmp 'jobs/keep-max.jsonc') -Content '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ], "Snapshot": { "KeepFor": "365d" } }'
+Assert-Equal 'array expiry capped at 365d' (Get-EvpConfig -Path $path).Snapshot.ArrayExpiryMs 31536000000
 Test-ConfigError 'user without password' '{ "Veeam": { "User": "x" }, "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'must be set together'
 Test-ConfigError 'bad backend' '{ "Veeam": { "Backend": "soap" }, "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'Veeam.Backend'
 Test-ConfigError 'bad job id' '{ "Veeam": { "JobId": "not-a-guid" }, "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'Veeam.JobId'

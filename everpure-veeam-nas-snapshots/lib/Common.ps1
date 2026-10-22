@@ -249,22 +249,23 @@ function Get-EvpConfig {
 	if ($tag -notmatch '^[A-Za-z0-9-]{1,40}$' -or $tag -notmatch '[A-Za-z]' -or $tag -match '^-|-$') {
 		$problems.Add("Snapshot.Tag '$tag' is invalid: 1 to 40 letters, digits and '-', at least one letter, not starting or ending with '-'. Both arrays enforce this character set.")
 	}
-	$lifetime = [string](Get-EvpProperty $sn 'Lifetime')
-	if (-not $lifetime) { $lifetime = '7d' }
-	$lifetimeMs = 0L
-	try { $lifetimeMs = ConvertTo-EvpMilliseconds -Duration $lifetime -MinimumMs 300000 -MaximumMs 31536000000 } catch { $problems.Add("Snapshot.Lifetime: $($_.Exception.Message)") }
-	$sweep = Get-EvpProperty $sn 'SweepOlderThan'
-	$sweepText = if ($null -eq $sweep) { '2d' } else { [string]$sweep }
-	$sweepMs = 0L
-	try { $sweepMs = ConvertTo-EvpMilliseconds -Duration $sweepText } catch { $problems.Add("Snapshot.SweepOlderThan: $($_.Exception.Message)") }
+	# One retention setting. 'none' (default): the post phase destroys the run's snapshots and
+	# the pre phase sweeps whatever an earlier run left behind. A duration keeps every snapshot
+	# of this tag for that long; both phases destroy only older ones.
+	$keepFor = Get-EvpProperty $sn 'KeepFor'
+	$keepForText = if ($null -eq $keepFor -or [string]$keepFor -eq '') { 'none' } else { [string]$keepFor }
+	$keepForMs = 0L
+	try { $keepForMs = ConvertTo-EvpMilliseconds -Duration $keepForText } catch { $problems.Add("Snapshot.KeepFor: $($_.Exception.Message)") }
+	# FlashArray backstop expiry (keep_for) in case neither phase ever runs again: retention plus
+	# a week, capped at the array's 365-day maximum. FlashBlade has no per-snapshot expiry.
+	$arrayExpiryMs = [Math]::Min($keepForMs + 604800000L, 31536000000L)
 	$root = [string](Get-EvpProperty $sn 'SnapshotRootDirName')
 	if (-not $root) { $root = '.snapshot' }
 	$snapshot = [ordered]@{
 		Tag                 = $tag
-		Lifetime            = $lifetime
-		LifetimeMs          = $lifetimeMs
-		SweepOlderThan      = $sweepText
-		SweepOlderThanMs    = $sweepMs
+		KeepFor             = $keepForText
+		KeepForMs           = $keepForMs
+		ArrayExpiryMs       = $arrayExpiryMs
 		SnapshotRootDirName = $root
 		MatchPattern        = Get-EvpSnapshotMatchPattern -Tag $tag
 	}
@@ -274,16 +275,10 @@ function Get-EvpConfig {
 	$failSafe = Get-EvpProperty $b 'FailSafePath'
 	$ensureMode = Get-EvpProperty $b 'EnsureProcessingMode'
 	$failIfNone = Get-EvpProperty $b 'FailIfNoSnapshots'
-	$keepYounger = Get-EvpProperty $b 'PostKeepYoungerThan'
-	$keepYoungerText = if ($null -eq $keepYounger) { 'none' } else { [string]$keepYounger }
-	$keepYoungerMs = 0L
-	try { $keepYoungerMs = ConvertTo-EvpMilliseconds -Duration $keepYoungerText } catch { $problems.Add("Behaviour.PostKeepYoungerThan: $($_.Exception.Message)") }
 	$behaviour = [ordered]@{
 		FailSafePath         = if ($null -ne $failSafe) { [bool]$failSafe } else { $true }
 		EnsureProcessingMode = if ($null -ne $ensureMode) { [bool]$ensureMode } else { $true }
 		FailIfNoSnapshots    = if ($null -ne $failIfNone) { [bool]$failIfNone } else { $false }
-		PostKeepYoungerThan  = $keepYoungerText
-		PostKeepYoungerThanMs = $keepYoungerMs
 	}
 
 	# --- Logging -----------------------------------------------------------------------------
