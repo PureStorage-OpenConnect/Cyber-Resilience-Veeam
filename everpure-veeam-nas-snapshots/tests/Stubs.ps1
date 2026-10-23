@@ -243,6 +243,7 @@ function New-LabRoutes {
 		if ($q['context_names']) {
 			if ($ctx -cnotin @('FLA', 'FLB', 'FBX', 'FLC')) { return (New-MockResponse -Status 400 -Body @{ errors = @(@{ message = 'Cannot find array in fleet' }) }) }
 			if ($ctx -ceq 'FBX') { return (New-MockResponse -Status 400 -Body @{ errors = @(@{ message = 'Cross-product requests are not supported' }) }) }
+			if ($r.Method -eq 'GET' -and $q.ContainsKey('names') -and $q['allow_errors'] -ne 'true') { return (New-MockResponse -Status 400 -Body @{ errors = @(@{ message = 'Cannot specify search parameter names without allow_errors.' }) }) }
 		}
 		$answer = if ($State.FlIgnoreContext) { 'FLA' } else { $ctx }
 		$items = switch -Regex ($path) {

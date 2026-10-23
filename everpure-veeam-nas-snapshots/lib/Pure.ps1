@@ -119,13 +119,23 @@ function Invoke-EvpArrayApi {
 	$continuation = $null
 	do {
 		$q = @{} + $Query
-		if ($Session.Context) { $q['context_names'] = $Session.Context }
+		if ($Session.Context) {
+			$q['context_names'] = $Session.Context
+			# Purity 6.12 refuses a names= search with context_names unless allow_errors is set
+			# ("Cannot specify search parameter names without allow_errors"). With one context a
+			# missing name is still an HTTP 400, so the answers do not change otherwise.
+			if ($Method -eq 'GET' -and $q.ContainsKey('names')) { $q['allow_errors'] = 'true' }
+		}
 		if ($continuation) { $q['continuation_token'] = $continuation }
 		$qs = ($q.GetEnumerator() | Sort-Object Name | ForEach-Object { '{0}={1}' -f [uri]::EscapeDataString($_.Name), [uri]::EscapeDataString([string]$_.Value) }) -join '&'
 		$uri = "$($Session.BaseUri)/$Path" + $(if ($qs) { "?$qs" } else { '' })
 		$r = Invoke-EvpHttp -Method $Method -Uri $uri -Headers $Session.Headers -Body $Body -Tls $Session.Tls
 		if (-not $r.Success) { throw "$($Session.Platform) '$($Session.Endpoint)' $Method $Path failed: $(Get-EvpHttpErrorText $r)" }
 		$body = $r.Body
+		# allow_errors can turn a partial failure into a 207 with an errors list: still a failure.
+		if ($null -ne $body -and $body.PSObject.Properties.Name -contains 'errors' -and @($body.errors).Count -gt 0) {
+			throw "$($Session.Platform) '$($Session.Endpoint)' $Method $Path failed: $((@($body.errors) | ForEach-Object { "$($_.message) ($($_.context))" }) -join '; ')"
+		}
 		if ($null -ne $body -and $body.PSObject.Properties.Name -contains 'items') { foreach ($i in @($body.items)) { if ($null -ne $i) { $items.Add($i) } } }
 		elseif ($null -ne $body) { $items.Add($body) }
 		$continuation = if ($Method -eq 'GET' -and $null -ne $body -and $body.PSObject.Properties.Name -contains 'continuation_token') { $body.continuation_token } else { $null }
