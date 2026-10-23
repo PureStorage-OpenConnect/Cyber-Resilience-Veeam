@@ -5,7 +5,7 @@ here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 scripts follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version is
 declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start of every run.
 
-## [Unreleased]
+## [1.1.0] - 2026-10-23 <!-- style-check: ignore -->
 
 ### Added
 
@@ -33,7 +33,7 @@ declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start 
   must name the member it was meant for; anything else is refused. `-Fleet` on the secrets
   helper adds such an entry and lists the members. FlashBlades need a plain entry each, since
   Purity//FB 4.8 does not take `context_names` on `network-interfaces`.
-- **ActiveCluster for File.** When a realm VIP is listed on both arrays of a pair, the share
+- **ActiveCluster for File.** When a realm VIP is listed on both arrays of a pair, the share <!-- style-check: ignore -->
   maps to the array that reports itself `online` for it, also against the array of the last run.
 - **Failures stay with the shares they concern.** A share that cannot be mapped, whose array is
   unreachable, whose source cannot be snapshotted or that cannot be repointed gets the fail-safe
@@ -64,14 +64,15 @@ declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start 
 - A pre phase in which only some shares fail no longer puts every share on the fail-safe path
   (see FailSafeScope above). A share missing from the Veeam inventory is reported and the others
   go on.
-- Fixed: a `-WhatIf` dry run of the pre phase saw no shares, because `ForEach-Object <Member>`
-  honours `-WhatIf` and returned nothing.
-- Fixed (also in 1.0.0): the job guard refused the scripts of an active full run, because Veeam
-  names that session `<job> (Full)` and the session lookup matched the job name exactly. It now
-  matches the name as a prefix and decides by job ID.
-- Verify counts destroyed snapshots that wait for eradication apart from the live ones; 1.0.0
-  counted them as existing.
 - The array API token also needs to read network interfaces (the `storage_admin` role does).
+
+### Fixed
+
+- The job guard refused the scripts of an active full run (also in 1.0.0), because Veeam names
+  that session `<job> (Full)` and the session lookup matched the job name exactly. It now matches
+  the name as a prefix and decides by job ID.
+- Verify counted destroyed snapshots that wait for eradication as existing (also in 1.0.0). It
+  now counts them apart from the live ones.
 
 ## [1.0.0] - 2026-10-22 <!-- style-check: ignore -->
 

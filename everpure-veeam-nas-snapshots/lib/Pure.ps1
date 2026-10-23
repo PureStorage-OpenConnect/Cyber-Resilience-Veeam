@@ -102,7 +102,7 @@ function Invoke-EvpArrayApi {
 		Calls the Purity REST API and returns the items (following continuation tokens on GET).
 	.DESCRIPTION
 		For a fleet member session (Session.Context set) every call carries context_names, and
-		every returned item must name that context. Fusion engineers note that an endpoint without
+		every returned item must name that context. An endpoint without
 		fleet support ignores context_names silently and answers for the login array; such an
 		answer is refused here, so nothing is ever listed or destroyed on the wrong array. An item
 		without a context is refused too (fail closed).
