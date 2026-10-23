@@ -75,9 +75,9 @@ Export-ModuleMember -Function @(
 	'Connect-EvpVeeam', 'Disconnect-EvpVeeam', 'Test-EvpVeeamModule', 'Get-EvpVeeamShares', 'Find-EvpVeeamShare', 'Set-EvpVeeamStorageSnapshotPath',
 	'Get-EvpVeeamJob', 'Find-EvpVeeamJobByName', 'Get-EvpVeeamActiveJobSessions', 'Assert-EvpVeeamJobSession',
 	# Pure
-	'Connect-EvpArray', 'Invoke-EvpArrayApi', 'Get-EvpArrayFileInterfaces', 'Resolve-EvpArraySource', 'New-EvpArraySnapshot', 'Get-EvpArraySnapshots', 'Remove-EvpArraySnapshots',
+	'Connect-EvpArray', 'Invoke-EvpArrayApi', 'Get-EvpArrayFileInterfaces', 'Get-EvpFleetMemberSessions','Resolve-EvpArraySource', 'New-EvpArraySnapshot', 'Get-EvpArraySnapshots', 'Remove-EvpArraySnapshots',
 	# Discovery
-	'Get-EvpRunShares', 'Resolve-EvpShareHostAddress', 'Connect-EvpArraysForShares', 'Get-EvpDefaultStateDirectory', 'Get-EvpStatePath',
+	'Get-EvpRunShares', 'Resolve-EvpShareHostAddress', 'New-EvpArrayPool', 'Expand-EvpFleets', 'Get-EvpArrayNames', 'Open-EvpArraySession', 'Connect-EvpArraysForShares', 'Get-EvpDefaultStateDirectory', 'Get-EvpStatePath',
 	'Read-EvpState', 'Get-EvpCachedShareArray', 'Get-EvpOrphanSources', 'Invoke-EvpOrphanCleanup', 'Save-EvpState',
 	# Orchestrate
 	'Get-EvpExitCodeTable', 'Write-EvpPlan', 'Invoke-EvpPrePhase', 'Invoke-EvpPostPhase', 'Invoke-EvpVerifyPhase',

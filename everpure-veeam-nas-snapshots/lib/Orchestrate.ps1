@@ -33,7 +33,10 @@ function Write-EvpPlan {
 	Write-Host "Platform           : $($Platform.Name), running as $($Platform.Identity)$(if ($Platform.InSandbox) { ' (appliance sandbox)' })"
 	Write-Host "Veeam              : $($Config.Veeam.Server) backend $($Config.Veeam.Backend)$(if ($Config.Veeam.User) { " user $($Config.Veeam.User)" })"
 	if ($Config.Veeam.JobId) { Write-Host "Bound job          : $($Config.Veeam.JobId) (job guard on, shares read from the job)" }
-	foreach ($a in $Config.Arrays.Values) { Write-Host "Array              : $($a.Name) = $($a.Endpoint) ($($a.Platform), TLS $($a.Tls))" }
+	foreach ($a in $Config.Arrays.Values) {
+		if ($a.Type -eq 'Fleet') { Write-Host "Fleet              : $($a.Name) through $($a.Endpoint) (members found at run time, TLS $($a.Tls))" }
+		else { Write-Host "Array              : $($a.Name) = $($a.Endpoint) ($($a.Platform), TLS $($a.Tls))" }
+	}
 	$label = if ($Config.Veeam.JobId) { 'Share override     ' } else { 'Share              ' }
 	foreach ($s in $Config.Shares) { Write-Host "${label}: $($s.VeeamPath) [$($s.Protocol)] on $(if ($s.Array) { $s.Array } else { 'the array owning its address' }), source $($s.Source)" }
 	Write-Host "Snapshot tag       : $($Config.Snapshot.Tag), keep for $(if ($Config.Snapshot.KeepForMs -gt 0) { $Config.Snapshot.KeepFor } else { 'the job run only' }), FlashArray expiry $([TimeSpan]::FromMilliseconds($Config.Snapshot.ArrayExpiryMs).ToString('d\d\ h\h\ m\m'))"
@@ -372,11 +375,21 @@ function Invoke-EvpVerifyPhase {
 	}
 	$plan = Connect-EvpArraysForShares -Config $Config -Platform $Platform -Shares $shares -FullScan -Tolerant
 	# Arrays no share needed were not contacted by the mapping; check their tokens too.
-	foreach ($name in $Config.Arrays.Keys) { $null = Open-EvpArraySession -Config $Config -Platform $Platform -Name $name -Sessions $plan.Sessions -Unreachable $plan.Unreachable }
-	foreach ($name in $Config.Arrays.Keys) {
-		if ($plan.Unreachable.Contains($name)) { Write-Host "WARN $($name): $($plan.Unreachable[$name])"; continue }
-		Write-Host "OK   $($name): $($plan.Sessions[$name].Platform) '$($plan.Sessions[$name].ArrayName)', Purity $($plan.Sessions[$name].PurityVersion)"
-		if ($Config.Arrays[$name].Tls -eq 'skip') {
+	$pool = $plan.Pool
+	foreach ($name in (Get-EvpArrayNames -Config $Config -Platform $Platform -Pool $pool)) { $null = Open-EvpArraySession -Config $Config -Platform $Platform -Name $name -Pool $pool }
+	foreach ($entry in $Config.Arrays.Values) {
+		$name = $entry.Name
+		if ($entry.Type -eq 'Fleet') {
+			if ($pool.Unreachable.Contains($name)) { Write-Host "WARN fleet $($name): $($pool.Unreachable[$name])" }
+			elseif ($pool.Fleets.Contains($name)) {
+				$f = $pool.Fleets[$name]
+				Write-Host "OK   fleet $($name): '$($f.Fleet)' through $($entry.Endpoint)"
+				foreach ($m in $f.Members.Values) { Write-Host "OK     member $($m.Name): $($m.Platform), Purity $($m.PurityVersion)" }
+				foreach ($k in $f.Skipped.Keys) { Write-Host "       member $($k) skipped: $($f.Skipped[$k])" }
+			}
+		} elseif ($pool.Unreachable.Contains($name)) { Write-Host "WARN $($name): $($pool.Unreachable[$name])"; continue }
+		else { Write-Host "OK   $($name): $($pool.Sessions[$name].Platform) '$($pool.Sessions[$name].ArrayName)', Purity $($pool.Sessions[$name].PurityVersion)" }
+		if ($entry.Tls -eq 'skip') {
 			Write-Warning "$($name): Tls 'skip' accepts any certificate, so the API token can be intercepted on the network. Pin the certificate with Tls 'thumbprint:<SHA-256>' in arrays.jsonc; Protect-EverpureVeeamSecret.ps1 -Array $name -VerifyOnly prints it."
 		}
 	}

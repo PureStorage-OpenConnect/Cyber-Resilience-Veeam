@@ -465,6 +465,76 @@ Assert-Equal '-NoJobGuard: still the job shares' @(Get-VeeamCalls | Where-Object
 $rc = Invoke-EvpPrePhase -Config $jobCfg -Platform $platform 6>$null 3>$null
 Assert-Equal 'with the guard and no session: refused' $rc 2
 
+Write-TestSection 'Fleet: members through one endpoint'
+$flDir = Join-Path $tmp 'fleet'
+$flShares = @(@{ VeeamPath = '\\192.0.2.40\fla-share' }, @{ VeeamPath = '\\192.0.2.41\flb-share' })
+$flCfgPath = New-LabConfigFile -Directory $flDir -Name 'fleet-job' -Overrides @{ Arrays = @(@{ Name = 'labfleet'; Type = 'Fleet'; Endpoint = 'fl'; ApiTokenFile = 'secrets/fl.token' }); Shares = $flShares; Snapshot = @{ KeepFor = 'none' } }
+[System.IO.File]::WriteAllText((Join-Path $flDir 'secrets/fl.token'), "fl-token`n")
+$flCfg = Get-EvpConfig -Path $flCfgPath
+Assert-Equal 'fleet entry type' $flCfg.Arrays['labfleet'].Type 'Fleet'
+Assert-Throws 'a fleet is no array for a Shares override' { Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'fleet-bad') -Overrides @{ Arrays = @(@{ Name = 'labfleet'; Type = 'Fleet'; Endpoint = 'fl'; ApiTokenFile = 't' }); Shares = @(@{ VeeamPath = '\\x\y'; Array = 'labfleet' }) }) } 'is a fleet; set Array to the member'
+$memberOverride = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'fleet-member') -Overrides @{ Arrays = @(@{ Name = 'labfleet'; Type = 'Fleet'; Endpoint = 'fl'; ApiTokenFile = 't' }); Shares = @(@{ VeeamPath = '\\x\y'; Array = 'FLB' }) })
+Assert-Equal 'a member name in a Shares override is checked at run time' $memberOverride.Shares[0].Array 'FLB'
+$state = New-LabState; Use-LabMock $state; Reset-Logs
+$pool = New-EvpArrayPool
+$names = @(Get-EvpArrayNames -Config $flCfg -Platform $platform -Pool $pool 6>$null 3>$null)
+Assert-Equal 'usable members: FlashArrays that joined' ($names -join ',') 'FLA,FLB'
+Assert-True  'FlashBlade member skipped as cross-product' ($pool.Fleets['labfleet'].Skipped['FBX'] -match 'other product')
+Assert-True  'member that has not joined skipped' ($pool.Fleets['labfleet'].Skipped['FLC'] -match 'joining')
+Assert-Equal 'one login for the whole fleet' @(Get-HttpCalls | Where-Object { $_.Method -eq 'POST' -and $_.Uri -like '*/login' }).Count 1
+Assert-Equal 'member session carries its context' $pool.Sessions['FLB'].Context 'FLB'
+$plan = Connect-EvpArraysForShares -Config $flCfg -Platform $platform -Shares (Get-EvpRunShares -Config $flCfg -Job $null) -Pool $pool 6>$null 3>$null
+Assert-Equal 'shares mapped to members' ((@($plan.Shares) | ForEach-Object { "$($_.ShareName)@$($_.Array)" }) -join ',') 'fla-share@FLA,flb-share@FLB'
+Assert-True  'FlashArray server hint read from attached_servers' ((@($plan.Shares) | Where-Object ShareName -eq 'flb-share').ServerHint -eq '_array_server')
+Assert-True  'every member call carries context_names' (-not (Get-HttpCalls | Where-Object { $_.Uri -like 'https://fl/api/2.42/directory-exports*' -and $_.Uri -notmatch 'context_names=FL[AB]' }))
+# ActiveCluster: the realm VIP is on both members; the online one serves it.
+$ac = @(New-EvpShareRecord -VeeamPath '\\192.0.2.30\ac-share')
+$plan = Connect-EvpArraysForShares -Config $flCfg -Platform $platform -Shares $ac 6>$null 3>$null
+Assert-Equal 'ActiveCluster: the online array serves the share' @($plan.Shares)[0].Array 'FLB'
+Assert-Equal 'ActiveCluster: pod directory as source' $plan.Groups.Values[0].SourceName 'pod1::fsac:root'
+$staleCache = [pscustomobject]@{ Version = 1; Shares = @([pscustomobject]@{ VeeamPath = '\\192.0.2.30\ac-share'; Array = 'FLA' }); Sources = @() }
+$plan = Connect-EvpArraysForShares -Config $flCfg -Platform $platform -Shares @(New-EvpShareRecord -VeeamPath '\\192.0.2.30\ac-share') -State $staleCache 6>$null 3>$null
+Assert-Equal 'ActiveCluster: a cached standby array is not trusted' @($plan.Shares)[0].Array 'FLB'
+# Fail closed: an answer for another context, or none, is refused.
+$state = New-LabState; $state.FlIgnoreContext = $true; Use-LabMock $state
+Assert-Throws 'an endpoint that ignores context_names is refused' { Connect-EvpArraysForShares -Config $flCfg -Platform $platform -Shares @(New-EvpShareRecord -VeeamPath '\\192.0.2.41\flb-share' -Array 'FLB') 6>$null 3>$null } 'was answered for context .FLA.'
+$state = New-LabState; $state.FlPostNoContext = $true; Use-LabMock $state
+$p2 = New-EvpArrayPool
+$flb = Open-EvpArraySession -Config $flCfg -Platform $platform -Name 'FLB' -Pool $p2 6>$null 3>$null
+Assert-Throws 'a create answered without context is refused' { New-EvpArraySnapshot -Session $flb -SourceName 'fsb:dir1' -Tag 'veeam-x' 6>$null } "context '<none>'"
+Assert-Equal 'unknown member: no session' $null (Open-EvpArraySession -Config $flCfg -Platform $platform -Name 'NOPE' -Pool $p2 3>$null)
+Assert-True  'unknown member: reason recorded' ($p2.Unreachable['NOPE'] -match 'no array or fleet member')
+# A direct entry for a member wins over the fleet.
+$both = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'fleet-both') -Overrides @{ Arrays = @(@{ Name = 'labfleet'; Type = 'Fleet'; Endpoint = 'fl'; ApiTokenFile = 'secrets/fl.token' }, @{ Name = 'flb'; Endpoint = 'fl'; ApiTokenFile = 'secrets/fl.token' }); Shares = $flShares })
+[System.IO.File]::WriteAllText((Join-Path $tmp 'fleet-both/secrets/fl.token'), "fl-token`n")
+$state = New-LabState; Use-LabMock $state
+$p3 = New-EvpArrayPool
+$null = Get-EvpArrayNames -Config $both -Platform $platform -Pool $p3 6>$null 3>$null
+Assert-True  'a member with its own entry is left to it' ($p3.Fleets['labfleet'].Skipped['FLB'] -match "own entry 'flb'")
+
+Write-TestSection 'Fleet: pre and post through the fleet'
+$labInventory = $env:EVP_TEST_INVENTORY
+$env:EVP_TEST_INVENTORY = Join-Path $tmp 'fleet-inventory.json'
+[System.IO.File]::WriteAllText($env:EVP_TEST_INVENTORY, (ConvertTo-Json -Depth 3 -InputObject @(
+			@{ Type = 'VBRNASSMBServer'; Id = '22222222-2222-4222-8222-000000000001'; Path = '\\192.0.2.40\fla-share'; ProcessingMode = 'Direct'; DirectBackupFailoverEnabled = $true; StorageSnapshotPath = '' },
+			@{ Type = 'VBRNASSMBServer'; Id = '22222222-2222-4222-8222-000000000002'; Path = '\\192.0.2.41\flb-share'; ProcessingMode = 'Direct'; DirectBackupFailoverEnabled = $true; StorageSnapshotPath = '' })))
+$state = New-LabState; Use-LabMock $state; Reset-Logs
+$rc = Invoke-EvpPrePhase -Config $flCfg -Platform $platform 6>$null 3>$null
+Assert-Equal 'pre exit 0' $rc 0
+$flPosts = @(Get-HttpCalls | Where-Object { $_.Method -eq 'POST' -and $_.Uri -like 'https://fl/api/2.42/directory-snapshots*' })
+Assert-Equal 'one snapshot per member source, each with its context' (($flPosts | ForEach-Object { if ($_.Uri -match 'context_names=(\w+)') { $Matches[1] } } | Sort-Object) -join ',') 'FLA,FLB'
+Assert-Equal 'snapshots created on the right members' (($state.FlSnapshots | ForEach-Object { "$($_.on):$($_.source.name)" } | Sort-Object) -join ',') 'FLA:fsa:dir1,FLB:fsb:dir1'
+$flState = Get-Content (Join-Path $flDir 'state/fleet-job.state.json') -Raw | ConvertFrom-Json
+Assert-Equal 'state records the members' (($flState.Sources | ForEach-Object { $_.Array } | Sort-Object) -join ',') 'FLA,FLB'
+Reset-Logs
+$rc = Invoke-EvpPostPhase -Config $flCfg -Platform $platform 6>$null 3>$null
+Assert-Equal 'post exit 0' $rc 0
+Assert-Equal 'post destroyed both, through their contexts' (($state.FlSnapshots | Where-Object destroyed | ForEach-Object on | Sort-Object) -join ',') 'FLA,FLB'
+$r = Invoke-Captured { Invoke-EvpVerifyPhase -Config $flCfg -Platform $platform }
+Assert-Equal 'verify passes with a fleet' $r.Code 0
+Assert-True  'verify lists the fleet and its members' ($r.Text -match "OK   fleet labfleet: 'LABFLEET'" -and $r.Text -match 'OK     member FLB' -and $r.Text -match 'member FBX skipped')
+$env:EVP_TEST_INVENTORY = $labInventory
+
 Write-TestSection 'File-to-tape job'
 $tapeId = 'cdcdcdcd-9999-4999-8999-000000000009'
 $tapeRoots = @('\\192.0.2.20\projects-smb', '192.0.2.20:/projects-nfs')
@@ -648,6 +718,12 @@ $r = Invoke-Helper "-Array fa -Endpoint other -Secret (ConvertTo-SecureString 'x
 Assert-True  'helper -Endpoint: another endpoint for a known array is refused' ($r.ExitCode -ne 0 -and $r.Output -match "with endpoint 'fa'\. Edit the entry there")
 $r = Invoke-Helper "-Array fa, fb -Endpoint fa"
 Assert-True  'helper -Endpoint: only one array at a time' ($r.ExitCode -ne 0 -and $r.Output -match 'adds one array')
+$r = Invoke-Helper "-Array labfleet -Endpoint fl -Fleet -Secret (ConvertTo-SecureString 'fl-token' -AsPlainText -Force)"
+Assert-Equal 'helper -Fleet: exit 0' $r.ExitCode 0
+Assert-Equal 'helper -Fleet: entry of type Fleet' ((Read-EvpArraysFile -Path (Join-Path $helperDir 'arrays.jsonc'))['labfleet'].Type) 'Fleet'
+Assert-True  'helper -Fleet: verification lists the members' ($r.Output -match "Fleet       : 'LABFLEET', usable members FLA, FLB" -and $r.Output -match 'skipped FBX')
+$r = Invoke-Helper "-Array labfleet -Endpoint fl -Secret (ConvertTo-SecureString 'fl-token' -AsPlainText -Force) -Force"
+Assert-True  'helper: a fleet entry is not silently an array' ($r.ExitCode -ne 0 -and $r.Output -match 'as Type Fleet')
 
 Write-TestSection 'Generator: nothing is written without a valid job'
 $generator = Join-Path $projectRoot 'New-EverpureVeeamJobScripts.ps1'

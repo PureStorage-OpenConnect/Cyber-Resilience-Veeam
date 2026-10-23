@@ -77,33 +77,116 @@ function Resolve-EvpShareHostAddress {
 	}
 }
 
+function New-EvpArrayPool {
+	<#
+	.SYNOPSIS
+		The array logins of one run: sessions, failures and expanded fleets, shared by mapping,
+		cleanup and verify so that every array is logged in to at most once.
+	#>
+	[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+		Justification = 'Builds an empty record; changes nothing.')]
+	[CmdletBinding()]
+	[OutputType([psobject])]
+	param()
+	return [pscustomobject]@{
+		Sessions    = [ordered]@{}   # array name -> session (fleet members included)
+		Unreachable = [ordered]@{}   # array or fleet name -> reason
+		Fleets      = [ordered]@{}   # fleet entry name -> { Fleet, Members, Skipped }
+		Expanded    = $false
+	}
+}
+
+function Expand-EvpFleets {
+	<#
+	.SYNOPSIS
+		Logs in to every Type Fleet entry once and adds its members to the pool as arrays.
+	.DESCRIPTION
+		A member that also has an entry of its own (same name, any case) is left to that entry:
+		a direct login wins over the fleet. Members of the other product are skipped (no
+		cross-product calls), and so is a member that has not joined.
+	#>
+	[CmdletBinding()]
+	param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Platform, [Parameter(Mandatory)] $Pool)
+	if ($Pool.Expanded) { return }
+	$Pool.Expanded = $true
+	$direct = @($Config.Arrays.Values | Where-Object { $_.Type -ne 'Fleet' } | ForEach-Object { $_.Name })
+	foreach ($entry in @($Config.Arrays.Values | Where-Object { $_.Type -eq 'Fleet' })) {
+		try {
+			$token = Unprotect-EvpSecret -Path $entry.ApiTokenFile -Platform $Platform
+			$login = Connect-EvpArray -ArrayConfig $entry -ApiToken $token
+			$fleet = Get-EvpFleetMemberSessions -Session $login -EntryName $entry.Name
+		} catch {
+			$Pool.Unreachable[$entry.Name] = $_.Exception.Message
+			Write-Warning "Fleet '$($entry.Name)' ($($entry.Endpoint)) is not usable: $($_.Exception.Message)"
+			continue
+		}
+		foreach ($name in @($fleet.Members.Keys)) {
+			$own = $direct | Where-Object { $_ -ieq $name } | Select-Object -First 1
+			if ($own) { $fleet.Skipped[$name] = "has its own entry '$own'"; $fleet.Members.Remove($name); continue }
+			if ($Pool.Sessions.Contains($name)) { $fleet.Skipped[$name] = 'already reached through another fleet entry'; $fleet.Members.Remove($name); continue }
+			$Pool.Sessions[$name] = $fleet.Members[$name]
+		}
+		$Pool.Fleets[$entry.Name] = $fleet
+		Write-Host "Fleet '$($fleet.Fleet)' through '$($entry.Endpoint)': members $(if ($fleet.Members.Count) { ($fleet.Members.Keys -join ', ') } else { 'none usable' })$(if ($fleet.Skipped.Count) { '; skipped ' + (($fleet.Skipped.GetEnumerator() | ForEach-Object { "$($_.Key) ($($_.Value))" }) -join ', ') })."
+	}
+}
+
+function Get-EvpArrayNames {
+	<#
+	.SYNOPSIS
+		Every array a run can use: the plain entries plus the members of the fleet entries.
+	#>
+	[CmdletBinding()]
+	[OutputType([string[]])]
+	param([Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Platform, [Parameter(Mandatory)] $Pool)
+	$names = @($Config.Arrays.Values | Where-Object { $_.Type -ne 'Fleet' } | ForEach-Object { $_.Name })
+	if (@($Config.Arrays.Values | Where-Object { $_.Type -eq 'Fleet' }).Count) {
+		Expand-EvpFleets -Config $Config -Platform $Platform -Pool $Pool
+		$names += @($Pool.Fleets.Values | ForEach-Object { $_.Members.Keys })
+	}
+	return @($names)
+}
+
 function Open-EvpArraySession {
 	<#
 	.SYNOPSIS
-		Logs in to one configured array once per run, recording a failure instead of throwing.
+		Logs in to one array once per run, recording a failure instead of throwing.
+	.DESCRIPTION
+		A plain entry logs in directly. Any other name is looked up among the fleet members, which
+		expands the fleet entries the first time it is needed.
 	.OUTPUTS
-		The session, or $null when the array is unreachable (the reason is in Unreachable).
+		The session, or $null when the array is unreachable (the reason is in Pool.Unreachable).
 	#>
 	[CmdletBinding()]
 	param(
 		[Parameter(Mandatory)] $Config,
 		[Parameter(Mandatory)] $Platform,
 		[Parameter(Mandatory)] [string] $Name,
-		[Parameter(Mandatory)] [System.Collections.IDictionary] $Sessions,
-		[Parameter(Mandatory)] [System.Collections.IDictionary] $Unreachable
+		[Parameter(Mandatory)] $Pool
 	)
-	if ($Sessions.Contains($Name)) { return $Sessions[$Name] }
-	if ($Unreachable.Contains($Name)) { return $null }
+	if ($Pool.Sessions.Contains($Name)) { return $Pool.Sessions[$Name] }
+	if ($Pool.Unreachable.Contains($Name)) { return $null }
 	$arrayConfig = $Config.Arrays[$Name]
-	try {
-		$token = Unprotect-EvpSecret -Path $arrayConfig.ApiTokenFile -Platform $Platform
-		$Sessions[$Name] = Connect-EvpArray -ArrayConfig $arrayConfig -ApiToken $token
-		return $Sessions[$Name]
-	} catch {
-		$Unreachable[$Name] = $_.Exception.Message
-		Write-Warning "Array '$Name' ($($arrayConfig.Endpoint)) is not usable: $($_.Exception.Message)"
-		return $null
+	if ($arrayConfig -and $arrayConfig.Type -ne 'Fleet') {
+		try {
+			$token = Unprotect-EvpSecret -Path $arrayConfig.ApiTokenFile -Platform $Platform
+			$Pool.Sessions[$Name] = Connect-EvpArray -ArrayConfig $arrayConfig -ApiToken $token
+			return $Pool.Sessions[$Name]
+		} catch {
+			$Pool.Unreachable[$Name] = $_.Exception.Message
+			Write-Warning "Array '$Name' ($($arrayConfig.Endpoint)) is not usable: $($_.Exception.Message)"
+			return $null
+		}
 	}
+	Expand-EvpFleets -Config $Config -Platform $Platform -Pool $Pool
+	if ($Pool.Sessions.Contains($Name)) { return $Pool.Sessions[$Name] }
+	if (-not $Pool.Unreachable.Contains($Name)) {
+		$skipped = @($Pool.Fleets.Values | Where-Object { $_.Skipped.Contains($Name) } | Select-Object -First 1)
+		$Pool.Unreachable[$Name] = if ($arrayConfig) { "'$Name' is a fleet entry, not an array" }
+		elseif ($skipped) { "fleet member '$Name' of '$($skipped[0].Fleet)' is not usable: $($skipped[0].Skipped[$Name])" }
+		else { "no array or fleet member named '$Name' is configured" }
+	}
+	return $null
 }
 
 function Connect-EvpArraysForShares {
@@ -113,18 +196,23 @@ function Connect-EvpArraysForShares {
 	.DESCRIPTION
 		A share with Array set uses that array. Any other share is mapped through the arrays' file
 		interfaces: first on the array the cache recorded for it, then, for whatever is still
-		unmapped, on every configured array. An array that cannot be reached or rejects its token
-		is a warning as long as every share still maps somewhere.
+		unmapped, on every configured array and fleet member. An array that cannot be reached or
+		rejects its token is a warning as long as every share still maps somewhere.
+		ActiveCluster: a realm VIP is listed on both arrays of the pair. When several arrays own
+		an address and exactly one of them reports itself 'online' for it, that array serves the
+		share; the cache is not trusted for an array that is only 'available' (standby) now.
 	.PARAMETER State
 		State of the last run (Read-EvpState), or $null.
 	.PARAMETER FullScan
 		Ignore the cache and ask every array (verify), so an address owned twice is noticed.
 	.PARAMETER Tolerant
 		Report shares that cannot be mapped or resolved in Unmapped instead of throwing.
+	.PARAMETER Pool
+		Logins to reuse (New-EvpArrayPool); a new pool when omitted.
 	.OUTPUTS
-		Ordered hashtable: Sessions (array name -> session), Groups (key "array|source" ->
-		{ Array, Session, SourceName, SourceInfo, Shares }), Shares (the shares that resolved,
-		with Array set), Unmapped ({ Share, Reason }) and Unreachable (array name -> message).
+		Ordered hashtable: Pool, Sessions and Unreachable (the pool's), Groups (key
+		"array|source" -> { Array, Session, SourceName, SourceInfo, Shares }), Shares (the shares
+		that resolved, with Array set) and Unmapped ({ Share, Reason }).
 	#>
 	[CmdletBinding()]
 	param(
@@ -133,40 +221,41 @@ function Connect-EvpArraysForShares {
 		[Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Shares,
 		$State,
 		[switch] $FullScan,
-		[switch] $Tolerant
+		[switch] $Tolerant,
+		$Pool
 	)
 
-	$sessions = [ordered]@{}
-	$unreachable = [ordered]@{}
+	if (-not $Pool) { $Pool = New-EvpArrayPool }
 	$interfaces = [ordered]@{}
 	$addresses = @{}
 	$mapped = [System.Collections.Generic.List[object]]::new()
 	$pending = [System.Collections.Generic.List[object]]::new()
 	$unmapped = [System.Collections.Generic.List[object]]::new()
 
-	function Get-Interfaces([string] $Name) {
+	function Get-InterfaceList([string] $Name) {
 		if ($interfaces.Contains($Name)) { return $interfaces[$Name] }
 		$interfaces[$Name] = @()
-		$session = Open-EvpArraySession -Config $Config -Platform $Platform -Name $Name -Sessions $sessions -Unreachable $unreachable
+		$session = Open-EvpArraySession -Config $Config -Platform $Platform -Name $Name -Pool $Pool
 		if (-not $session) { return @() }
 		try { $interfaces[$Name] = @(Get-EvpArrayFileInterfaces -Session $session) }
 		catch {
-			$unreachable[$Name] = "network-interfaces could not be read: $($_.Exception.Message)"
-			Write-Warning "Array '$Name': $($unreachable[$Name])"
+			$Pool.Unreachable[$Name] = "network-interfaces could not be read: $($_.Exception.Message)"
+			Write-Warning "Array '$Name': $($Pool.Unreachable[$Name])"
 		}
 		return $interfaces[$Name]
 	}
 	function Add-Mapping($Share, [string] $Name, $Interface, [string] $How) {
 		$Share.Array = $Name
 		$Share.ServerHint = $Interface.Server
-		Write-Host "Share '$($Share.VeeamPath)' -> array '$Name' (file interface $($Interface.Address)$(if ($Interface.Server) { " of server '$($Interface.Server)'" })$How)."
+		$ac = if ($Interface.Availability) { ", ActiveCluster: $($Interface.Availability) here" } else { '' }
+		Write-Host "Share '$($Share.VeeamPath)' -> array '$Name' (file interface $($Interface.Address)$(if ($Interface.Server) { " of server '$($Interface.Server)'" })$ac$How)."
 		$mapped.Add($Share)
 	}
 
 	foreach ($share in $Shares) {
 		if ($share.Array) {
-			if (Open-EvpArraySession -Config $Config -Platform $Platform -Name $share.Array -Sessions $sessions -Unreachable $unreachable) { $mapped.Add($share) }
-			else { $unmapped.Add([pscustomobject]@{ Share = $share; Reason = "array '$($share.Array)', set in Shares, is not usable: $($unreachable[$share.Array])" }) }
+			if (Open-EvpArraySession -Config $Config -Platform $Platform -Name $share.Array -Pool $Pool) { $mapped.Add($share) }
+			else { $unmapped.Add([pscustomobject]@{ Share = $share; Reason = "array '$($share.Array)', set in Shares, is not usable: $($Pool.Unreachable[$share.Array])" }) }
 			continue
 		}
 		$addresses[$share.VeeamPath] = @(Resolve-EvpShareHostAddress -HostName $share.Server)
@@ -174,30 +263,34 @@ function Connect-EvpArraysForShares {
 		$pending.Add($share)
 	}
 
-	# Pass 1: the array that served the share last time.
+	# Pass 1: the array that served the share last time, unless it is only the standby now.
 	if (-not $FullScan -and $State -and $pending.Count -gt 0) {
 		foreach ($share in @($pending)) {
 			$cached = Get-EvpCachedShareArray -State $State -VeeamPath $share.VeeamPath
-			if (-not $cached -or -not $Config.Arrays.Contains($cached)) { continue }
-			$hit = @(Get-Interfaces $cached) | Where-Object { $_.Address -in $addresses[$share.VeeamPath] } | Select-Object -First 1
-			if ($hit) { Add-Mapping $share $cached $hit ', as in the last run'; $null = $pending.Remove($share) }
+			if (-not $cached) { continue }
+			$hit = @(Get-InterfaceList $cached) | Where-Object { $_.Address -in $addresses[$share.VeeamPath] } | Select-Object -First 1
+			if ($hit -and (-not $hit.Availability -or $hit.Availability -eq 'online')) { Add-Mapping $share $cached $hit ', as in the last run'; $null = $pending.Remove($share) }
 		}
 	}
 
 	# Pass 2: every array, for whatever is still unmapped.
 	if ($pending.Count -gt 0) {
-		foreach ($name in $Config.Arrays.Keys) { $null = Get-Interfaces $name }
+		foreach ($name in (Get-EvpArrayNames -Config $Config -Platform $Platform -Pool $Pool)) { $null = Get-InterfaceList $name }
 		foreach ($share in $pending) {
 			$owners = @(foreach ($name in $interfaces.Keys) {
 					$hit = @($interfaces[$name]) | Where-Object { $_.Address -in $addresses[$share.VeeamPath] } | Select-Object -First 1
 					if ($hit) { [pscustomobject]@{ Array = $name; Interface = $hit } }
 				})
+			if ($owners.Count -gt 1) {
+				$online = @($owners | Where-Object { $_.Interface.Availability -eq 'online' })
+				if ($online.Count -eq 1) { Add-Mapping $share $online[0].Array $online[0].Interface " (also on $(($owners | Where-Object Array -ne $online[0].Array | ForEach-Object Array) -join ', '))"; continue }
+			}
 			if ($owners.Count -eq 1) { Add-Mapping $share $owners[0].Array $owners[0].Interface ''; continue }
 			$reason = if ($owners.Count -gt 1) {
-				"its address is a file interface of $($owners.Count) arrays ($(($owners | ForEach-Object { $_.Array }) -join ', ')); set Shares[].Array for it"
+				"its address is a file interface of $($owners.Count) arrays ($(($owners | ForEach-Object { "$($_.Array)$(if ($_.Interface.Availability) { " $($_.Interface.Availability)" })" }) -join ', ')); set Shares[].Array for it"
 			} else {
 				$text = "no configured array has a file interface with address $($addresses[$share.VeeamPath] -join ' or ')"
-				if ($unreachable.Count) { $text += "; not reachable: $($unreachable.Keys -join ', ')" }
+				if ($Pool.Unreachable.Count) { $text += "; not reachable: $($Pool.Unreachable.Keys -join ', ')" }
 				$text
 			}
 			$unmapped.Add([pscustomobject]@{ Share = $share; Reason = $reason })
@@ -207,10 +300,10 @@ function Connect-EvpArraysForShares {
 	$groups = [ordered]@{}
 	$resolved = [System.Collections.Generic.List[object]]::new()
 	foreach ($share in $mapped) {
-		$session = $sessions[$share.Array]
+		$session = $Pool.Sessions[$share.Array]
 		try { $info = Resolve-EvpArraySource -Session $session -Share $share }
 		catch { $unmapped.Add([pscustomobject]@{ Share = $share; Reason = $_.Exception.Message }); continue }
-		Write-Host "Share '$($share.VeeamPath)' -> $($session.Platform) '$($session.ArrayName)' source '$($info.Name)'."
+		Write-Host "Share '$($share.VeeamPath)' -> $($session.Platform) '$($session.ArrayName)'$(if ($session.Fleet) { " (fleet '$($session.Fleet)')" }) source '$($info.Name)'."
 		$share.Source = $info.Name
 		$key = '{0}|{1}' -f $share.Array, $info.Name
 		if (-not $groups.Contains($key)) {
@@ -223,7 +316,7 @@ function Connect-EvpArraysForShares {
 	if ($unmapped.Count -gt 0 -and -not $Tolerant) {
 		throw ("$($unmapped.Count) share(s) could not be mapped to an array source:`n  - " + (($unmapped | ForEach-Object { "$($_.Share.VeeamPath): $($_.Reason)" }) -join "`n  - "))
 	}
-	return [ordered]@{ Sessions = $sessions; Groups = $groups; Shares = $resolved.ToArray(); Unmapped = $unmapped.ToArray(); Unreachable = $unreachable }
+	return [ordered]@{ Pool = $Pool; Sessions = $Pool.Sessions; Groups = $groups; Shares = $resolved.ToArray(); Unmapped = $unmapped.ToArray(); Unreachable = $Pool.Unreachable }
 }
 
 #endregion
@@ -299,10 +392,12 @@ function Get-EvpOrphanSources {
 	[OutputType([object[]])]
 	param($State, [Parameter(Mandatory)] $Config, [Parameter(Mandatory)] $Plan)
 	if (-not $State) { return @() }
+	# A fleet member is no key of Config.Arrays; with a fleet configured, the cleanup finds out.
+	$haveFleet = [bool]@($Config.Arrays.Values | Where-Object { $_.Type -eq 'Fleet' }).Count
 	$orphans = foreach ($s in @($State.Sources)) {
 		if (-not $s.Array -or -not $s.Source) { continue }
 		if ($Plan.Groups.Contains(('{0}|{1}' -f $s.Array, $s.Source))) { continue }
-		if (-not $Config.Arrays.Contains([string]$s.Array)) {
+		if (-not $Config.Arrays.Contains([string]$s.Array) -and -not $haveFleet) {
 			Write-Warning "Source '$($s.Source)' of the last run was on array '$($s.Array)', which is no longer configured; it is dropped from the state and its tagged snapshots stay."
 			continue
 		}
@@ -332,7 +427,7 @@ function Invoke-EvpOrphanCleanup {
 	)
 	$result = [pscustomobject]@{ Remaining = [System.Collections.Generic.List[object]]::new(); Destroyed = 0; Failed = 0 }
 	foreach ($o in $Orphans) {
-		$session = Open-EvpArraySession -Config $Config -Platform $Platform -Name $o.Array -Sessions $Plan.Sessions -Unreachable $Plan.Unreachable
+		$session = Open-EvpArraySession -Config $Config -Platform $Platform -Name $o.Array -Pool $Plan.Pool
 		if (-not $session) { $result.Remaining.Add($o); $result.Failed++; continue }
 		try {
 			$tagged = @(Get-EvpArraySnapshots -Session $session -SourceName $o.Source | Where-Object { -not $_.Destroyed -and (Get-EvpSnapshotTimestamp -Name $_.Name -Tag $Config.Snapshot.Tag) })

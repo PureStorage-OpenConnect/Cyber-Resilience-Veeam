@@ -221,6 +221,74 @@ function New-LabRoutes {
 		if ($j) { $j } else { New-MockResponse -Status 404 -Body @{ message = 'job not found' } }
 	}
 	$routes['GET ^https://vbr:9419/api/v1/sessions\?jobIdFilter=([^&]+)&limit=200$'] = { param($r, $m); @{ data = @($State.VeeamSessions | Where-Object { $_.jobId -eq $m.Groups[1].Value }) } }
+
+	# --- Fleet: login on 'fl' (member FLA), shaped like Purity//FA 6.12.3 in the lab ----------
+	# Members FLA, FLB (FlashArrays), FBX (FlashBlade: cross-product, refused) and FLC (not joined).
+	# The ActiveCluster realm VIP 192.0.2.30 is listed on FLA and FLB with the same
+	# array_availability (FLA available, FLB online). FlIgnoreContext answers every call for FLA,
+	# like an endpoint that ignores context_names; FlPostNoContext leaves the context out of POST
+	# answers. Context names are case-sensitive, as on the arrays.
+	$routes['GET ^https://fl/api/api_version$'] = { @{ version = @('2.0', '2.42') } }
+	$routes['POST ^https://fl/api/2\.42/login$'] = {
+		param($r)
+		if ($r.Headers['api-token'] -ne 'fl-token') { return (New-MockResponse -Status 400 -Body @{ errors = @(@{ message = 'Unable to list user for API token.' }) }) }
+		New-MockResponse -Body @{ username = 'svc-backup' } -Headers @{ 'x-auth-token' = 'fl-session' }
+	}
+	$fleetHandler = {
+		param($r, $m)
+		$path = $m.Groups['path'].Value
+		$q = @{}
+		foreach ($kv in ($m.Groups['q'].Value -split '&')) { if ($kv) { $k, $v = $kv -split '=', 2; $q[$k] = $v } }
+		$ctx = if ($q['context_names']) { $q['context_names'] } else { 'FLA' }
+		if ($q['context_names']) {
+			if ($ctx -cnotin @('FLA', 'FLB', 'FBX', 'FLC')) { return (New-MockResponse -Status 400 -Body @{ errors = @(@{ message = 'Cannot find array in fleet' }) }) }
+			if ($ctx -ceq 'FBX') { return (New-MockResponse -Status 400 -Body @{ errors = @(@{ message = 'Cross-product requests are not supported' }) }) }
+		}
+		$answer = if ($State.FlIgnoreContext) { 'FLA' } else { $ctx }
+		$items = switch -Regex ($path) {
+			'^fleets$' { return @{ items = @(@{ name = 'LABFLEET'; is_local = $true }) } }
+			'^fleets/members$' {
+				return @{ items = @(
+						@{ member = @{ name = 'FLA'; resource_type = 'remote-arrays' }; status = 'joined' },
+						@{ member = @{ name = 'FLB'; resource_type = 'remote-arrays' }; status = 'joined' },
+						@{ member = @{ name = 'FBX'; resource_type = 'remote-arrays' }; status = 'joined' },
+						@{ member = @{ name = 'FLC'; resource_type = 'remote-arrays' }; status = 'joining' }) }
+			}
+			'^arrays$' { , @{ name = $answer; os = 'Purity//FA'; version = '6.12.3' } }
+			'^network-interfaces$' {
+				$own = if ($answer -ceq 'FLA') { '192.0.2.40' } else { '192.0.2.41' }
+				$availability = @(@{ array = @{ name = 'FLA' }; status = 'available' }, @{ array = @{ name = 'FLB' }; status = 'online' })
+				@(@{ name = 'ct0.eth0'; enabled = $true; services = @('management'); eth = @{ address = '198.51.100.40' } },
+					@{ name = 'filevip'; enabled = $true; services = @('file'); server = $null; attached_servers = @(@{ name = '_array_server' }); eth = @{ address = $own; array_availability = $null } },
+					@{ name = 'realm1::srv1::vip'; enabled = $true; services = @('file'); server = @{ name = 'realm1::srv1' }; attached_servers = @(@{ name = 'realm1::srv1' }); eth = @{ address = '192.0.2.30'; array_availability = $availability } })
+			}
+			'^directory-exports$' {
+				$exports = @(
+					@{ on = 'FLA'; export_name = 'fla-share'; directory = @{ name = 'fsa:dir1' }; policy = @{ resource_type = 'policies/smb' }; server = @{ name = '_array_server' } },
+					@{ on = 'FLB'; export_name = 'flb-share'; directory = @{ name = 'fsb:dir1' }; policy = @{ resource_type = 'policies/smb' }; server = @{ name = '_array_server' } },
+					@{ on = 'FLA'; export_name = 'ac-share'; directory = @{ name = 'pod1::fsac:root' }; policy = @{ resource_type = 'policies/smb' }; server = @{ name = 'realm1::srv1' } },
+					@{ on = 'FLB'; export_name = 'ac-share'; directory = @{ name = 'pod1::fsac:root' }; policy = @{ resource_type = 'policies/smb' }; server = @{ name = 'realm1::srv1' } })
+				@($exports | Where-Object { $_.on -ceq $answer -and $_.export_name -eq $q['export_names'] })
+			}
+			'^directories$' { , @{ name = $q['names'] } }
+			'^directory-snapshots$' {
+				if ($r.Method -eq 'POST') {
+					$name = '{0}.{1}.{2}' -f $q['source_names'], $r.Body.client_name, $r.Body.suffix
+					$State.FlSnapshots += , @{ name = $name; on = $answer; source = @{ name = $q['source_names'] }; destroyed = $false; created = 0 }
+					if ($State.FlPostNoContext) { return @{ items = @(@{ name = $name }) } }
+					, @{ name = $name }
+				} elseif ($r.Method -eq 'PATCH') {
+					foreach ($s in $State.FlSnapshots) { if ($s.name -eq $q['names'] -and $s.on -ceq $answer) { $s.destroyed = $true } }
+					, @{ name = $q['names']; destroyed = $true }
+				} else {
+					@($State.FlSnapshots | Where-Object { $_.on -ceq $answer -and $_.source.name -eq $q['source_names'] } | ForEach-Object { @{ name = $_.name; source = $_.source; destroyed = $_.destroyed; created = $_.created } })
+				}
+			}
+			default { return (New-MockResponse -Status 404 -Body @{ errors = @(@{ message = "no fleet mock for $path" }) }) }
+		}
+		@{ items = @($items | ForEach-Object { $c = @{} + $_; $c.Remove('on'); $c['context'] = @{ name = $answer; resource_type = 'remote-arrays' }; $c }) }
+	}
+	foreach ($method in 'GET', 'POST', 'PATCH') { $routes["$method ^https://fl/api/2\.42/(?<path>[^?]+)(\?(?<q>.*))?$"] = $fleetHandler }
 	return $routes
 }
 
@@ -235,6 +303,9 @@ function New-LabState {
 		VeeamSaveResult      = 'Success'
 		VeeamJobs            = @()
 		VeeamSessions        = @()
+		FlSnapshots          = @()
+		FlIgnoreContext      = $false
+		FlPostNoContext      = $false
 		VeeamShares          = @(
 			[pscustomobject]@{ id = 'smb-1'; type = 'SMBShare'; path = '\\192.0.2.10\finance-smb'; advancedSettings = [pscustomobject]@{ processingMode = 'Direct'; directBackupFailoverEnabled = $true; storageSnapshotPath = '' } },
 			[pscustomobject]@{ id = 'nfs-1'; type = 'NFSShare'; path = '192.0.2.20:/projects-nfs'; advancedSettings = [pscustomobject]@{ processingMode = 'Direct'; directBackupFailoverEnabled = $true; storageSnapshotPath = '' } }

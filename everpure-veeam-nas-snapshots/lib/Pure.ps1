@@ -76,6 +76,10 @@ function Connect-EvpArray {
 		Tls           = $tls
 		ArrayName     = $null
 		PurityVersion = $null
+		# Set on fleet member sessions (Get-EvpFleetMemberSessions): every call then carries
+		# context_names and every returned item must name this context.
+		Context       = $null
+		Fleet         = $null
 	}
 	$arrays = @(Invoke-EvpArrayApi -Session $session -Path 'arrays')
 	if ($arrays.Count -gt 0) {
@@ -96,6 +100,12 @@ function Invoke-EvpArrayApi {
 	<#
 	.SYNOPSIS
 		Calls the Purity REST API and returns the items (following continuation tokens on GET).
+	.DESCRIPTION
+		For a fleet member session (Session.Context set) every call carries context_names, and
+		every returned item must name that context. Fusion engineers note that an endpoint without
+		fleet support ignores context_names silently and answers for the login array; such an
+		answer is refused here, so nothing is ever listed or destroyed on the wrong array. An item
+		without a context is refused too (fail closed).
 	#>
 	[CmdletBinding()]
 	param(
@@ -109,6 +119,7 @@ function Invoke-EvpArrayApi {
 	$continuation = $null
 	do {
 		$q = @{} + $Query
+		if ($Session.Context) { $q['context_names'] = $Session.Context }
 		if ($continuation) { $q['continuation_token'] = $continuation }
 		$qs = ($q.GetEnumerator() | Sort-Object Name | ForEach-Object { '{0}={1}' -f [uri]::EscapeDataString($_.Name), [uri]::EscapeDataString([string]$_.Value) }) -join '&'
 		$uri = "$($Session.BaseUri)/$Path" + $(if ($qs) { "?$qs" } else { '' })
@@ -119,7 +130,56 @@ function Invoke-EvpArrayApi {
 		elseif ($null -ne $body) { $items.Add($body) }
 		$continuation = if ($Method -eq 'GET' -and $null -ne $body -and $body.PSObject.Properties.Name -contains 'continuation_token') { $body.continuation_token } else { $null }
 	} while ($continuation)
+	if ($Session.Context) {
+		foreach ($i in $items) {
+			$ctx = if ($i.PSObject.Properties.Name -contains 'context' -and $i.context) { [string]$i.context.name } else { $null }
+			if ($ctx -cne $Session.Context) {
+				throw "Fleet '$($Session.Fleet)': $Method $Path for member '$($Session.Context)' was answered for context '$(if ($ctx) { $ctx } else { '<none>' })'. The endpoint does not honour context_names here; refusing the answer so nothing acts on the wrong array. Give this array its own entry in arrays.jsonc."
+			}
+		}
+	}
 	return $items.ToArray()
+}
+
+function Get-EvpFleetMemberSessions {
+	<#
+	.SYNOPSIS
+		Lists the members of the fleet a session is logged in to, as sessions of their own.
+	.DESCRIPTION
+		GET fleets/members names every member. A member session is a copy of the login session
+		with Context set, so all its calls go through the login array with context_names. Members
+		that have not joined are skipped, and so are members of the other product: a FlashArray
+		login cannot reach a FlashBlade member ("Cross-product requests are not supported") and
+		the other way round. Context names are case-sensitive and used exactly as reported.
+	.OUTPUTS
+		Record with Fleet (name), Members (member name -> session) and Skipped (name -> reason).
+	#>
+	[CmdletBinding()]
+	[OutputType([psobject])]
+	param([Parameter(Mandatory)] $Session, [Parameter(Mandatory)] [string] $EntryName)
+	$fleets = @(Invoke-EvpArrayApi -Session $Session -Path 'fleets')
+	if ($fleets.Count -eq 0) { throw "'$($Session.Endpoint)' is not a member of a fleet, so arrays.jsonc entry '$EntryName' cannot be Type Fleet. Make it a plain array entry." }
+	$result = [pscustomobject]@{ Fleet = [string]$fleets[0].name; Members = [ordered]@{}; Skipped = [ordered]@{} }
+	foreach ($m in @(Invoke-EvpArrayApi -Session $Session -Path 'fleets/members')) {
+		$name = [string]$m.member.name
+		if (-not $name) { continue }
+		if ([string]$m.status -ne 'joined') { $result.Skipped[$name] = "status '$($m.status)'"; continue }
+		$member = $Session.PSObject.Copy()
+		$member.Name = $name
+		$member.ArrayName = $name
+		$member.Context = $name
+		$member.Fleet = $result.Fleet
+		try {
+			$info = @(Invoke-EvpArrayApi -Session $member -Path 'arrays')
+		} catch {
+			$reason = if ($_.Exception.Message -match 'Cross-product') { "other product than '$($Session.ArrayName)' ($($Session.Platform)); needs its own entry" } else { $_.Exception.Message }
+			$result.Skipped[$name] = $reason
+			continue
+		}
+		$member.PurityVersion = [string]$info[0].version
+		$result.Members[$name] = $member
+	}
+	return $result
 }
 
 function Get-EvpArrayFileInterfaces {
@@ -127,12 +187,16 @@ function Get-EvpArrayFileInterfaces {
 	.SYNOPSIS
 		Lists the enabled interfaces that serve file shares, with their addresses.
 	.DESCRIPTION
-		FlashArray: network-interfaces whose services include 'file', address in eth.address.
-		FlashBlade: network-interfaces whose services include 'data', address in address, and
-		server.name, which tells which file server (and therefore which exports) the address
-		belongs to. Addresses are normalised through IPAddress, so IPv6 spellings compare equal.
+		FlashArray: network-interfaces whose services include 'file', address in eth.address; the
+		file server is in server or, for most VIPs, attached_servers. FlashBlade: network-interfaces
+		whose services include 'data', address in address, and server.name. The server tells which
+		exports the address belongs to. Addresses are normalised through IPAddress, so IPv6
+		spellings compare equal.
+		An ActiveCluster realm VIP is listed on both arrays of the pair, each with the same
+		eth.array_availability: 'online' for the array serving it, 'available' for the standby.
+		Availability is this array's own entry there, $null for an ordinary interface.
 	.OUTPUTS
-		Records with Name, Address, Server (or $null).
+		Records with Name, Address, Server and Availability (each possibly $null).
 	#>
 	[CmdletBinding()]
 	[OutputType([object[]])]
@@ -144,8 +208,14 @@ function Get-EvpArrayFileInterfaces {
 		$address = if ($i.eth -and $i.eth.address) { [string]$i.eth.address } else { [string]$i.address }
 		$ip = $null
 		if (-not [System.Net.IPAddress]::TryParse($address, [ref]$ip)) { continue }
-		$server = if ($i.server -and $i.server.name) { [string]$i.server.name } else { $null }
-		[pscustomobject]@{ Name = [string]$i.name; Address = $ip.ToString(); Server = $server }
+		$attached = @($i.attached_servers | ForEach-Object { [string]$_.name } | Where-Object { $_ })
+		$server = if ($i.server -and $i.server.name) { [string]$i.server.name } elseif ($attached.Count -eq 1) { $attached[0] } else { $null }
+		$availability = $null
+		if ($i.eth -and $i.eth.array_availability) {
+			$own = @($i.eth.array_availability) | Where-Object { [string]$_.array.name -eq $Session.ArrayName } | Select-Object -First 1
+			if ($own) { $availability = [string]$own.status }
+		}
+		[pscustomobject]@{ Name = [string]$i.name; Address = $ip.ToString(); Server = $server; Availability = $availability }
 	}
 	return @($records)
 }

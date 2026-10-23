@@ -27,6 +27,12 @@ declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start 
   the sweep and the post phase until none is left.
 - **File-to-tape jobs.** The job guard, the share discovery and the generator's job lookup work
   for file-to-tape jobs as well as file backup jobs.
+- **Fleets.** An `arrays.jsonc` entry with `"Type": "Fleet"` reaches every member of an Everpure
+  fleet of the same product through one endpoint and one token (`context_names`). Every answer
+  must name the member it was meant for; anything else is refused. `-Fleet` on the secrets
+  helper adds such an entry and lists the members.
+- **ActiveCluster for File.** When a realm VIP is listed on both arrays of a pair, the share
+  maps to the array that reports itself `online` for it, also against the array of the last run.
 - `Protect-EverpureVeeamSecret.ps1 -Array <name> -Endpoint <address>` adds the array to
   `arrays.jsonc` (keeping the file's comments), then stores and verifies its token. `-Array
   <name>` alone (or `-Array *`) takes the token file, endpoint and TLS policy from

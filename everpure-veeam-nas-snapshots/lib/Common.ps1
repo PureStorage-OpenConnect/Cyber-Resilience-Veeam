@@ -227,9 +227,12 @@ function Get-EvpConfig {
 		$protocol = Get-EvpShareProtocol -VeeamPath $veeamPath
 		if (-not $protocol) { $problems.Add("Shares[$index]: '$veeamPath' is neither an SMB path (\\server\share) nor an NFS path (server:/export)."); continue }
 		if (-not $seenPaths.Add((Get-EvpNormalizedSharePath -VeeamPath $veeamPath))) { $problems.Add("Shares: '$veeamPath' is listed more than once."); continue }
-		# Empty Array: mapped through the arrays' file interfaces at run time.
+		# Empty Array: mapped through the arrays' file interfaces at run time. A fleet member is only
+		# known once the fleet is asked, so with a fleet configured the name is checked at run time.
 		$arrayName = [string](Get-EvpProperty $s 'Array')
-		if ($arrayName -and -not $arrays.Contains($arrayName)) { $problems.Add("Shares[$index] ('$veeamPath') references unknown array '$arrayName'.") }
+		$haveFleet = [bool]@($arrays.Values | Where-Object { $_.Type -eq 'Fleet' }).Count
+		if ($arrayName -and -not $arrays.Contains($arrayName) -and -not $haveFleet) { $problems.Add("Shares[$index] ('$veeamPath') references unknown array '$arrayName'.") }
+		elseif ($arrayName -and $arrays.Contains($arrayName) -and $arrays[$arrayName].Type -eq 'Fleet') { $problems.Add("Shares[$index] ('$veeamPath'): '$arrayName' is a fleet; set Array to the member array that serves the share, or leave it empty.") }
 		$source = [string](Get-EvpProperty $s 'Source')
 		if (-not $source) { $source = 'auto' }
 		$shares.Add((New-EvpShareRecord -VeeamPath $veeamPath -Array $arrayName -Source $source -Origin 'config'))
@@ -349,7 +352,8 @@ function Add-EvpArraysFileEntry {
 		[Parameter(Mandatory)] [string] $Path,
 		[Parameter(Mandatory)] [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')] [string] $Name,
 		[Parameter(Mandatory)] [string] $Endpoint,
-		[string] $Tls = 'skip'
+		[string] $Tls = 'skip',
+		[ValidateSet('Array', 'Fleet')] [string] $Type = 'Array'
 	)
 	$fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
 	$text = [System.IO.File]::ReadAllText($fullPath)
@@ -380,14 +384,15 @@ function Add-EvpArraysFileEntry {
 	}
 	if ($listStart -lt 0 -or $listEnd -lt 0) { throw "'$fullPath' has no top-level Arrays list. Add `"Arrays`": [] to it first." }
 
-	$entry = '{{ "Name": {0}, "Endpoint": {1}, "ApiTokenFile": {2}, "Platform": "auto", "Tls": {3} }}' -f ($Name | ConvertTo-Json), ($Endpoint | ConvertTo-Json), ("secrets/$Name.token" | ConvertTo-Json), ($Tls | ConvertTo-Json)
+	$typeText = if ($Type -eq 'Fleet') { '"Type": "Fleet", ' } else { '' }
+	$entry = '{{ "Name": {0}, {4}"Endpoint": {1}, "ApiTokenFile": {2}, "Platform": "auto", "Tls": {3} }}' -f ($Name | ConvertTo-Json), ($Endpoint | ConvertTo-Json), ("secrets/$Name.token" | ConvertTo-Json), ($Tls | ConvertTo-Json), $typeText
 	$lineStart = $text.LastIndexOf("`n", $listEnd) + 1
 	$closingOnOwnLine = [string]::IsNullOrWhiteSpace($text.Substring($lineStart, $listEnd - $lineStart))
 	$newText = if ($closingOnOwnLine) { $text.Insert($lineStart, "`t`t$entry`n") } else { $text.Insert($listEnd, "`n`t`t$entry`n`t") }
 	# A previous entry ends with '}' as the last significant character before ']'.
 	if ($lastSignificant -gt $listStart -and $text[$lastSignificant] -eq '}') { $newText = $newText.Insert($lastSignificant + 1, ',') }
 
-	if (-not $PSCmdlet.ShouldProcess($fullPath, "Add array '$Name' ($Endpoint)")) { return }
+	if (-not $PSCmdlet.ShouldProcess($fullPath, "Add $($Type.ToLowerInvariant()) '$Name' ($Endpoint)")) { return }
 	[System.IO.File]::WriteAllText($fullPath, $newText, [System.Text.UTF8Encoding]::new($false))
 	try {
 		$arrays = Read-EvpArraysFile -Path $fullPath
@@ -421,6 +426,11 @@ function Add-EvpArrayConfig {
 			$where = if ($Target[$name].Origin -eq $Origin) { "more than once in '$Origin'" } else { "in both '$($Target[$name].Origin)' and '$Origin'" }
 			$Problems.Add("Arrays: the name '$name' is defined $where."); continue
 		}
+		# Type Fleet: the endpoint is one member of an Everpure fleet, and the other members of the
+		# same product are reached through it (context_names). See lib/Discovery.ps1.
+		$type = [string](Get-EvpProperty $a 'Type')
+		if (-not $type) { $type = 'Array' }
+		if ($type -notin @('Array', 'Fleet')) { $Problems.Add("Arrays['$name'].Type must be 'Array' or 'Fleet' (got '$type')."); $type = 'Array' }
 		$platform = [string](Get-EvpProperty $a 'Platform')
 		if (-not $platform) { $platform = 'auto' }
 		if ($platform -notin @('auto', 'FlashArray', 'FlashBlade')) { $Problems.Add("Arrays['$name'].Platform must be 'auto', 'FlashArray' or 'FlashBlade'.") }
@@ -433,6 +443,7 @@ function Add-EvpArrayConfig {
 		if (-not $tokenFile) { $Problems.Add("Arrays['$name'] has no ApiTokenFile.") }
 		$Target[$name] = [ordered]@{
 			Name         = $name
+			Type         = $type
 			Endpoint     = $endpoint
 			ApiTokenFile = $tokenFile
 			Platform     = $platform

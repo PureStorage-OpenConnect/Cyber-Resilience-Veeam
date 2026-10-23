@@ -46,6 +46,20 @@ warning while every share still maps to another array, and an error when a share
 left. Without `Veeam.JobId`, or with the REST backend, which cannot list job objects, `Shares` is
 the share list as in 1.0.0.
 
+**Fleets.** An API token logs in only on the array it was created on. Arrays in an Everpure
+fleet can instead be reached through one member: an `arrays.jsonc` entry with `"Type": "Fleet"`
+names that member's endpoint and token, and every member of the same product is then used like
+an array of its own, under the name Purity gives it (`FA02`). Every call to a member carries
+`context_names`, and every answer must name that member. An answer for another array or none is
+refused, so a call can never act on the wrong array. A fleet cannot reach the other product
+(FlashBlades in a fleet of FlashArrays need their own entry), and a member with its own entry
+uses that entry.
+
+**ActiveCluster for File.** A realm VIP of a synchronously replicated pod is listed on both
+arrays of the pair. The array that reports itself `online` for the VIP serves the share; the
+`available` standby is not used, not even when the last run used it. After a failover the next
+run follows the VIP to the other array.
+
 **Why the fail-safe.** Veeam only warns when a pre-job script fails and runs the job anyway.
 Without the sentinel a failed run would leave the shares pointing at the previous snapshot or
 at the live share, and the job would report success on stale data. A path that cannot be read

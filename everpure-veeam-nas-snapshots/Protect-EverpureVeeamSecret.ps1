@@ -55,6 +55,11 @@
 	With -Array: store the token without logging in to the array, for an array that is not
 	reachable from here yet.
 
+.PARAMETER Fleet
+	With -Array and -Endpoint: add the entry as Type Fleet. The endpoint is one member of an
+	Everpure fleet; the other members of the same product are then reached through it, with this
+	one token. The verification lists the members.
+
 .PARAMETER Path
 	Destination file, typically jobs/secrets/<array>.token or jobs/secrets/vbr.pwd.
 
@@ -97,6 +102,11 @@
 	jobs\secrets\fa01.token and logs in to the array to prove it works.
 
 .EXAMPLE
+	.\Protect-EverpureVeeamSecret.ps1 -Array fleet01 -Endpoint fa01.example.com -Fleet
+
+	Adds a fleet entry: fa01 and every FlashArray in its fleet are reached with fa01's token.
+
+.EXAMPLE
 	.\Protect-EverpureVeeamSecret.ps1 -Array fa01
 
 	Replaces the token of fa01, an array already in jobs\arrays.jsonc.
@@ -123,6 +133,7 @@ param(
 	[Parameter(Mandatory, ParameterSetName = 'Array')] [string[]] $Array,
 	[Parameter(ParameterSetName = 'Array')] [string] $ArraysFile,
 	[Parameter(ParameterSetName = 'Array')] [switch] $NoVerify,
+	[Parameter(ParameterSetName = 'Array')] [switch] $Fleet,
 	[Parameter(Mandatory, ParameterSetName = 'Path')] [string] $Path,
 	[Parameter(ParameterSetName = 'Path')] [ValidateSet('ArrayApiToken', 'VeeamPassword')] [string] $SecretType = 'ArrayApiToken',
 	[string] $Endpoint,
@@ -157,11 +168,14 @@ if ($byArray) {
 			Write-Host "Created '$arraysPath' from arrays.sample.jsonc."
 		}
 		$existing = (Read-EvpArraysFile -Path $arraysPath)[$Array[0]]
+		$type = if ($Fleet) { 'Fleet' } else { 'Array' }
 		if (-not $existing) {
-			Add-EvpArraysFileEntry -Path $arraysPath -Name $Array[0] -Endpoint $Endpoint -Tls $Tls
-			Write-Host "Added array '$($Array[0])' ($Endpoint) to '$arraysPath', token file secrets/$($Array[0]).token."
+			Add-EvpArraysFileEntry -Path $arraysPath -Name $Array[0] -Endpoint $Endpoint -Tls $Tls -Type $type
+			Write-Host "Added $($type.ToLowerInvariant()) '$($Array[0])' ($Endpoint) to '$arraysPath', token file secrets/$($Array[0]).token."
 		} elseif ($existing.Endpoint -ne $Endpoint) {
 			throw "Array '$($Array[0])' is already in '$arraysPath' with endpoint '$($existing.Endpoint)'. Edit the entry there, or leave -Endpoint out to store its token."
+		} elseif ($existing.Type -ne $type) {
+			throw "'$($Array[0])' is already in '$arraysPath' as Type $($existing.Type). Edit the entry there, or $(if ($Fleet) { 'leave -Fleet out' } else { 'add -Fleet' })."
 		} else {
 			Write-Host "Array '$($Array[0])' is already in '$arraysPath' with this endpoint."
 		}
@@ -171,7 +185,7 @@ if ($byArray) {
 	$names = if ($Array -contains '*') { @($defined.Keys) } else { $Array }
 	$unknown = @($names | Where-Object { -not $defined.Contains($_) })
 	if ($unknown.Count) { throw "Not in '$arraysPath': $($unknown -join ', '). Arrays defined there: $($defined.Keys -join ', '). Add one with -Array <name> -Endpoint <management address>." }
-	$targets = @($names | ForEach-Object { [pscustomobject]@{ Name = $_; Path = $defined[$_].ApiTokenFile; Endpoint = $defined[$_].Endpoint; Tls = $defined[$_].Tls } })
+	$targets = @($names | ForEach-Object { [pscustomobject]@{ Name = $_; Path = $defined[$_].ApiTokenFile; Endpoint = $defined[$_].Endpoint; Tls = $defined[$_].Tls; Type = $defined[$_].Type } })
 	$doVerify = -not $NoVerify
 } else {
 	$targets = @([pscustomobject]@{ Name = $Endpoint; Path = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path); Endpoint = $Endpoint; Tls = $Tls })
@@ -222,6 +236,11 @@ foreach ($t in $targets) {
 				$session = Connect-EvpArray -ArrayConfig $arrayConfig -ApiToken $stored
 				Write-Host ''
 				Write-Host "Verification succeeded: $($session.Platform) '$($session.ArrayName)', Purity $($session.PurityVersion), REST $($session.ApiVersion)."
+				if ($t.Type -eq 'Fleet') {
+					$fleetInfo = Get-EvpFleetMemberSessions -Session $session -EntryName $t.Name
+					Write-Host "Fleet       : '$($fleetInfo.Fleet)', usable members $(if ($fleetInfo.Members.Count) { $fleetInfo.Members.Keys -join ', ' } else { 'none' })"
+					foreach ($k in $fleetInfo.Skipped.Keys) { Write-Host "              skipped $($k): $($fleetInfo.Skipped[$k])" }
+				}
 				if ($t.Tls -eq 'skip') {
 					try {
 						$hash = Get-EvpServerCertificateHash -ComputerName $t.Endpoint

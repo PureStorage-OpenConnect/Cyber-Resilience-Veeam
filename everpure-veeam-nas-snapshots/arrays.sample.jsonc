@@ -14,6 +14,13 @@
 //
 // Per array:
 //   Name          used in logs, in the state file and in Shares[].Array overrides
+//   Type          "Array" (default) or "Fleet": the endpoint is one member of an Everpure fleet,
+//                 and every member of the same product (FlashArray or FlashBlade) is reached
+//                 through it with this one token, by the name Purity gives it (as in
+//                 Shares[].Array overrides and the state file). Add one with
+//                 .\Protect-EverpureVeeamSecret.ps1 -Array fleet01 -Endpoint fa01.example.com -Fleet.
+//                 Fleets cannot reach the other product: list FlashBlades in a fleet of
+//                 FlashArrays separately. A member with an entry of its own uses that entry.
 //   Endpoint      management address
 //   ApiTokenFile  file written by Protect-EverpureVeeamSecret.ps1. A relative path is relative to
 //                 the folder holding this file, which is the jobs folder (jobs/arrays.jsonc):
@@ -24,6 +31,7 @@
 {
 	"Arrays": [
 		// { "Name": "fa01", "Endpoint": "fa01.example.com", "ApiTokenFile": "secrets/fa01.token", "Platform": "auto", "Tls": "skip" },
-		// { "Name": "fb01", "Endpoint": "fb01.example.com", "ApiTokenFile": "secrets/fb01.token", "Platform": "auto", "Tls": "skip" }
+		// { "Name": "fb01", "Endpoint": "fb01.example.com", "ApiTokenFile": "secrets/fb01.token", "Platform": "auto", "Tls": "skip" },
+		// { "Name": "fleet01", "Type": "Fleet", "Endpoint": "fa02.example.com", "ApiTokenFile": "secrets/fleet01.token", "Platform": "auto", "Tls": "skip" }
 	]
 }
