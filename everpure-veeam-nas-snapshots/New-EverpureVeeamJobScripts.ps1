@@ -161,7 +161,9 @@ if ($arraysCreated) {
 }
 Write-Host '       .\Protect-EverpureVeeamSecret.ps1 -Array <name> -Endpoint <management address>'
 Write-Host "     It adds the array to $arraysPath, prompts for the API token, stores it and tests it."
-Write-Host '     Which array serves which share is worked out from the arrays'' file interfaces.'
+Write-Host '     The arrays file and the tokens are global: every job configuration in this folder uses them,'
+Write-Host '     so an array is added once, not per job. Which array serves which share is worked out from'
+Write-Host '     the arrays'' file interfaces.'
 Write-Host '  2. Optional: pin each array''s certificate (the helper prints its hash) in its "Tls" in arrays.jsonc.'
 Write-Host "  3. Verify: pwsh -NoProfile -File '$mainScript' -Phase verify -ConfigFile '$configPath'"
 Write-Host '     It lists the shares of the job and the array and source each one maps to.'
