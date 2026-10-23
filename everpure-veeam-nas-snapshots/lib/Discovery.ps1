@@ -283,7 +283,7 @@ function Connect-EvpArraysForShares {
 				})
 			if ($owners.Count -gt 1) {
 				$online = @($owners | Where-Object { $_.Interface.Availability -eq 'online' })
-				if ($online.Count -eq 1) { Add-Mapping $share $online[0].Array $online[0].Interface " (also on $(($owners | Where-Object Array -ne $online[0].Array | ForEach-Object Array) -join ', '))"; continue }
+				if ($online.Count -eq 1) { Add-Mapping $share $online[0].Array $online[0].Interface " (also on $(($owners | Where-Object Array -ne $online[0].Array | ForEach-Object { $_.Array }) -join ', '))"; continue }
 			}
 			if ($owners.Count -eq 1) { Add-Mapping $share $owners[0].Array $owners[0].Interface ''; continue }
 			$reason = if ($owners.Count -gt 1) {

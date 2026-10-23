@@ -210,7 +210,8 @@ function Set-EvpVeeamSnapshotPathPowerShell {
 		[Parameter(Mandatory)] $Session,
 		[Parameter(Mandatory)] $Share,
 		[Parameter(Mandatory)] [string] $StorageSnapshotPath,
-		[bool] $EnsureProcessingMode = $true
+		[bool] $EnsureProcessingMode = $true,
+		[bool] $Failover = $false
 	)
 	$cmdletName = switch ($Share.TypeName) {
 		'VBRNASSMBServer' { 'Set-VBRNASSMBServer' }
@@ -221,10 +222,10 @@ function Set-EvpVeeamSnapshotPathPowerShell {
 	if (-not $command) { throw "The Veeam cmdlet '$cmdletName' is not available in this version of the Veeam PowerShell module." }
 
 	$setParams = @{ Server = $Share.Raw; StorageSnapshotPath = $StorageSnapshotPath; ErrorAction = 'Stop' }
-	if ($command.Parameters.ContainsKey('EnableDirectBackupFailover')) { $setParams['EnableDirectBackupFailover'] = $false }
+	if ($command.Parameters.ContainsKey('EnableDirectBackupFailover')) { $setParams['EnableDirectBackupFailover'] = $Failover }
 	if ($EnsureProcessingMode -and $command.Parameters.ContainsKey('ProcessingMode')) { $setParams['ProcessingMode'] = 'StorageSnapshot' }
 
-	Write-Host "Pointing $($Share.Protocol) share '$($Share.Path)' at '$StorageSnapshotPath' ($cmdletName, failover off$(if ($EnsureProcessingMode) { ', mode StorageSnapshot' }))..."
+	Write-Host "Pointing $($Share.Protocol) share '$($Share.Path)' at '$StorageSnapshotPath' ($cmdletName, failover $(if ($Failover) { 'ON' } else { 'off' })$(if ($EnsureProcessingMode) { ', mode StorageSnapshot' }))..."
 	if ($PSCmdlet.ShouldProcess($Share.Path, "$cmdletName -StorageSnapshotPath '$StorageSnapshotPath'")) {
 		& $cmdletName @setParams | Out-Null
 	}
@@ -329,15 +330,16 @@ function Set-EvpVeeamSnapshotPathRest {
 		[Parameter(Mandatory)] $Share,
 		[Parameter(Mandatory)] [string] $StorageSnapshotPath,
 		[bool] $EnsureProcessingMode = $true,
+		[bool] $Failover = $false,
 		[int] $TimeoutSec = 120
 	)
 	$model = Invoke-EvpVeeamRest -Session $Session -Path "/api/v1/inventory/unstructuredDataServers/$($Share.Id)"
 	$adv = $model.advancedSettings
 	$adv.storageSnapshotPath = $StorageSnapshotPath
-	$adv.directBackupFailoverEnabled = $false
+	$adv.directBackupFailoverEnabled = $Failover
 	if ($EnsureProcessingMode) { $adv.processingMode = 'StorageSnapshot' }
 
-	Write-Host "Pointing $($Share.Protocol) share '$($Share.Path)' at '$StorageSnapshotPath' (REST PUT, failover off$(if ($EnsureProcessingMode) { ', mode StorageSnapshot' }))..."
+	Write-Host "Pointing $($Share.Protocol) share '$($Share.Path)' at '$StorageSnapshotPath' (REST PUT, failover $(if ($Failover) { 'ON' } else { 'off' })$(if ($EnsureProcessingMode) { ', mode StorageSnapshot' }))..."
 	if (-not $PSCmdlet.ShouldProcess($Share.Path, "PUT unstructuredDataServers storageSnapshotPath '$StorageSnapshotPath'")) { return $StorageSnapshotPath }
 
 	$save = Invoke-EvpVeeamRest -Session $Session -Method PUT -Path "/api/v1/inventory/unstructuredDataServers/$($Share.Id)" -Body $model
@@ -392,7 +394,7 @@ function Find-EvpVeeamShare {
 function Set-EvpVeeamStorageSnapshotPath {
 	<#
 	.SYNOPSIS
-		Points a share at a storage snapshot path with failover off, through the session's backend.
+		Points a share at a storage snapshot path with failover off (or on, for a live fallback), through the session's backend.
 	#>
 	[CmdletBinding(SupportsShouldProcess)]
 	[OutputType([string])]
@@ -400,14 +402,15 @@ function Set-EvpVeeamStorageSnapshotPath {
 		[Parameter(Mandatory)] $Session,
 		[Parameter(Mandatory)] $Share,
 		[Parameter(Mandatory)] [string] $StorageSnapshotPath,
-		[bool] $EnsureProcessingMode = $true
+		[bool] $EnsureProcessingMode = $true,
+		[bool] $Failover = $false
 	)
 	# -WhatIf is forwarded explicitly: $WhatIfPreference does not reliably cross function
 	# boundaries on every PowerShell 7 release.
 	if ($Session.Backend -eq 'PowerShell') {
-		return (Set-EvpVeeamSnapshotPathPowerShell -Session $Session -Share $Share -StorageSnapshotPath $StorageSnapshotPath -EnsureProcessingMode $EnsureProcessingMode -WhatIf:$WhatIfPreference)
+		return (Set-EvpVeeamSnapshotPathPowerShell -Session $Session -Share $Share -StorageSnapshotPath $StorageSnapshotPath -EnsureProcessingMode $EnsureProcessingMode -Failover $Failover -WhatIf:$WhatIfPreference)
 	}
-	return (Set-EvpVeeamSnapshotPathRest -Session $Session -Share $Share -StorageSnapshotPath $StorageSnapshotPath -EnsureProcessingMode $EnsureProcessingMode -WhatIf:$WhatIfPreference)
+	return (Set-EvpVeeamSnapshotPathRest -Session $Session -Share $Share -StorageSnapshotPath $StorageSnapshotPath -EnsureProcessingMode $EnsureProcessingMode -Failover $Failover -WhatIf:$WhatIfPreference)
 }
 
 #endregion

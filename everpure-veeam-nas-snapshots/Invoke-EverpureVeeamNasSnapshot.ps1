@@ -66,8 +66,9 @@
 .NOTES
 	Exit codes: 0 success, 1 configuration, 2 Veeam connection, 3 share resolution or update,
 	4 array connection, 5 snapshot create or destroy, 6 partial success (sweep or disarm
-	failures, see the log), 10 failure with the
-	fail-safe path applied. Veeam treats any non-zero code as a warning and runs the job.
+	failures, see the log), 10 failure with the fail-safe path applied, 11 some shares not
+	protected (they carry the fail-safe path) while the others back up from snapshots. Veeam
+	treats any non-zero code as a warning and runs the job.
 
 	Version: ModuleVersion in EverpureVeeamNas.psd1 (semantic versioning), printed at the start
 	of every run and listed in CHANGELOG.md.

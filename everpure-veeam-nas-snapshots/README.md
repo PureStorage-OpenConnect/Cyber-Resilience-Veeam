@@ -25,7 +25,8 @@ pre   0. job guard: a session of the bound job (Veeam.JobId) must be running, el
       4. point every share at <share>/.snapshot/<name>, failover off, mode StorageSnapshot
       5. sweep snapshots with the tag older than Snapshot.KeepFor (all earlier ones by default),
          also on sources of shares that have left the job; save the state of the run
-      on failure after step 1: point every share at a non-existent sentinel path (fail-safe)
+      a share that fails in steps 1 to 4 (not in the inventory, no array, no snapshot, no
+      repoint) gets Behaviour.OnFailure alone; the other shares go on (FailSafeScope Share)
 post  job guard, point every share at a non-existent path (disarm), then destroy the
       snapshots with the tag older than Snapshot.KeepFor (optional, highly recommended)
 verify check secrets, Veeam, the bound job and its shares, the mapping to arrays and sources;
@@ -65,6 +66,22 @@ Without the sentinel a failed run would leave the shares pointing at the previou
 at the live share, and the job would report success on stale data. A path that cannot be read
 turns that into a visible failure. Veeam reports `Cannot find a storage snapshot at the specified
 path, and failover to direct backup from the file share is disabled`.
+
+**Only what failed, fails.** A failure is contained to the smallest part it concerns. A share
+whose array is unreachable or that cannot be mapped, all shares of a source whose snapshot
+failed, or a share that could not be repointed get the fail-safe path on their own. Every other
+share still backs up from its snapshot, and the run exits 11 with warnings naming the failed
+shares. Only what concerns every share stops the whole run: Veeam, the job guard, reading the
+job. `Behaviour.FailSafeScope: "Job"` restores the 1.0.0 behaviour, where any failure puts every
+share on the fail-safe path, for jobs whose shares must come from one point in time or not at all.
+
+**Snapshot or fail, or a live fallback.** `Behaviour.OnFailure` decides what a share that cannot
+be backed up from a fresh snapshot gets. `"FailSafe"` (default) is the unreadable path with
+failover off: the backup of that share fails. `"LiveFallback"` is opt-in: the same path with
+Veeam's failover to direct backup on, so Veeam backs up the live share and only warns. Any backup
+beats none, but a live backup is not crash-consistent and nothing except those warnings shows
+it. `"None"` leaves the share as it is (`FailSafePath: false` in 1.0.0). The post phase disarms
+the shares the same way.
 
 **Why the post phase disarms the shares.** The fail-safe needs a working Veeam connection, so a
 pre phase that fails before it gets that far (Veeam unreachable, credentials expired, script
@@ -220,7 +237,8 @@ the earlier FlashArray-only scripts; clean those up manually.
 | 4 | array authentication or connectivity |
 | 5 | snapshot create or destroy |
 | 6 | partial success: pre set the backup up but the sweep had failures, or post cleaned up but could not disarm every share |
-| 10 | failure, fail-safe path applied |
+| 10 | failure, `Behaviour.OnFailure` applied to every share |
+| 11 | partial: some shares back up from snapshots; the others failed and got `Behaviour.OnFailure` (see the warnings) |
 
 Veeam treats every non-zero code as a warning and runs the job; the codes are for operators and
 for the job log, the sentinel path is what protects the backup.

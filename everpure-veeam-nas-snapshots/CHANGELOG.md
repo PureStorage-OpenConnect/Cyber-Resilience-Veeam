@@ -33,6 +33,14 @@ declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start 
   helper adds such an entry and lists the members.
 - **ActiveCluster for File.** When a realm VIP is listed on both arrays of a pair, the share
   maps to the array that reports itself `online` for it, also against the array of the last run.
+- **Failures stay with the shares they concern.** A share that cannot be mapped, whose array is
+  unreachable, whose source cannot be snapshotted or that cannot be repointed gets the fail-safe
+  path on its own; the other shares back up from their snapshots. New exit code 11 for such a
+  partial run. `Behaviour.FailSafeScope: "Job"` keeps the 1.0.0 all-or-nothing behaviour.
+- **Live fallback, opt-in.** `Behaviour.OnFailure: "LiveFallback"` gives a share that cannot be
+  backed up from a snapshot Veeam's failover to direct backup, so the live share is backed up
+  with a warning instead of failing. `"FailSafe"` stays the default; `"None"` is the 1.0.0
+  `FailSafePath: false`, which keeps working.
 - `Protect-EverpureVeeamSecret.ps1 -Array <name> -Endpoint <address>` adds the array to
   `arrays.jsonc` (keeping the file's comments), then stores and verifies its token. `-Array
   <name>` alone (or `-Array *`) takes the token file, endpoint and TLS policy from
@@ -50,8 +58,11 @@ declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start 
   `-NoJobId` writes a configuration without a job binding on purpose.
 - The post phase continues on the arrays it can reach when one is unreachable (exit code 4), and
   leaves that array's sources for the next run.
-- The pre phase reports every share missing from the Veeam inventory at once, and the fail-safe
-  covers all the shares that were found.
+- A pre phase in which only some shares fail no longer puts every share on the fail-safe path
+  (see FailSafeScope above). A share missing from the Veeam inventory is reported and the others
+  go on.
+- Fixed: a `-WhatIf` dry run of the pre phase saw no shares, because `ForEach-Object <Member>`
+  honours `-WhatIf` and returned nothing.
 - The array API token also needs to read network interfaces (the `storage_admin` role does).
 
 ## [1.0.0] - 2026-10-22 <!-- style-check: ignore -->

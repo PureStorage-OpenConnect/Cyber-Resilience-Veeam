@@ -272,8 +272,21 @@ function Get-EvpConfig {
 	$failSafe = Get-EvpProperty $b 'FailSafePath'
 	$ensureMode = Get-EvpProperty $b 'EnsureProcessingMode'
 	$failIfNone = Get-EvpProperty $b 'FailIfNoSnapshots'
+	$scope = [string](Get-EvpProperty $b 'FailSafeScope')
+	if (-not $scope) { $scope = 'Share' }
+	if ($scope -notin @('Share', 'Job')) { $problems.Add("Behaviour.FailSafeScope must be 'Share' or 'Job' (got '$scope').") }
+	# What a share that cannot be protected gets. FailSafe: a non-existent snapshot path with
+	# failover off, the backup fails. LiveFallback: the same path with failover on, so Veeam backs
+	# up the live share and warns. None: left as it is. FailSafePath (1.0.0) false means None.
+	$onFailure = [string](Get-EvpProperty $b 'OnFailure')
+	if (-not $onFailure) { $onFailure = if ($null -ne $failSafe -and -not [bool]$failSafe) { 'None' } else { 'FailSafe' } }
+	$onFailureNames = @{ failsafe = 'FailSafe'; livefallback = 'LiveFallback'; none = 'None' }
+	if (-not $onFailureNames.ContainsKey($onFailure.ToLowerInvariant())) { $problems.Add("Behaviour.OnFailure must be 'FailSafe', 'LiveFallback' or 'None' (got '$onFailure')."); $onFailure = 'FailSafe' }
+	$onFailure = $onFailureNames[$onFailure.ToLowerInvariant()]
 	$behaviour = [ordered]@{
-		FailSafePath         = if ($null -ne $failSafe) { [bool]$failSafe } else { $true }
+		OnFailure            = $onFailure
+		FailSafePath         = ($onFailure -ne 'None')
+		FailSafeScope        = (Get-Culture).TextInfo.ToTitleCase($scope.ToLowerInvariant())
 		EnsureProcessingMode = if ($null -ne $ensureMode) { [bool]$ensureMode } else { $true }
 		FailIfNoSnapshots    = if ($null -ne $failIfNone) { [bool]$failIfNone } else { $false }
 	}

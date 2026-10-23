@@ -303,7 +303,7 @@ Write-TestSection 'Exit code table'
 $codes = Get-EvpExitCodeTable
 Assert-Equal 'success 0' $codes.Success 0
 Assert-Equal 'fail-safe 10' $codes.FailSafe 10
-Assert-Equal 'eight codes' $codes.Count 8
+Assert-Equal 'nine codes' $codes.Count 9
 
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue
 Complete-TestRun

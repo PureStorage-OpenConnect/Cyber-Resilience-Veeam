@@ -11,9 +11,10 @@
 	  1  configuration or usage error   5  snapshot create or destroy
 	  2  Veeam authentication/connect   6  partial success (see log)
 	  3  share resolution or update    10  failure, fail-safe path applied
+	                                   11  some shares not protected (fail-safe), the rest are
 #>
 
-$script:EvpExitCode = @{ Success = 0; Config = 1; Veeam = 2; Share = 3; Array = 4; Snapshot = 5; Partial = 6; FailSafe = 10 }
+$script:EvpExitCode = @{ Success = 0; Config = 1; Veeam = 2; Share = 3; Array = 4; Snapshot = 5; Partial = 6; FailSafe = 10; PartialFailSafe = 11 }
 
 function Get-EvpExitCodeTable {
 	<# Exit code table, for the README generator and the tests. #>
@@ -40,7 +41,8 @@ function Write-EvpPlan {
 	$label = if ($Config.Veeam.JobId) { 'Share override     ' } else { 'Share              ' }
 	foreach ($s in $Config.Shares) { Write-Host "${label}: $($s.VeeamPath) [$($s.Protocol)] on $(if ($s.Array) { $s.Array } else { 'the array owning its address' }), source $($s.Source)" }
 	Write-Host "Snapshot tag       : $($Config.Snapshot.Tag), keep for $(if ($Config.Snapshot.KeepForMs -gt 0) { $Config.Snapshot.KeepFor } else { 'the job run only' }), FlashArray expiry $([TimeSpan]::FromMilliseconds($Config.Snapshot.ArrayExpiryMs).ToString('d\d\ h\h\ m\m'))"
-	Write-Host "Behaviour          : fail-safe path $($Config.Behaviour.FailSafePath), enforce StorageSnapshot mode $($Config.Behaviour.EnsureProcessingMode)"
+	Write-Host "Behaviour          : on failure $($Config.Behaviour.OnFailure) per $($Config.Behaviour.FailSafeScope.ToLowerInvariant()), enforce StorageSnapshot mode $($Config.Behaviour.EnsureProcessingMode)"
+	if ($Config.Behaviour.OnFailure -eq 'LiveFallback') { Write-Host 'Live fallback      : ON. A share that cannot be backed up from a snapshot is backed up live; only Veeam warnings show it.' }
 	if ($DryRun) { Write-Host 'Mode               : DRY RUN (-WhatIf), nothing will be changed' }
 }
 
@@ -54,6 +56,13 @@ function Invoke-EvpPrePhase {
 	<#
 	.SYNOPSIS
 		Pre-job: snapshot every source once, point every share at its snapshot, sweep old ones.
+	.DESCRIPTION
+		Failures are contained to the smallest part they concern (Behaviour.FailSafeScope
+		'Share', the default). A share that cannot be mapped to an array source, whose source
+		cannot be snapshotted, or that cannot be repointed gets the fail-safe path on its own; the
+		other shares still back up from their snapshots, and the run exits 11. Only what concerns
+		every share (Veeam, the job guard, the job) stops the whole phase. With FailSafeScope
+		'Job' any failure applies the fail-safe path to every share, as in 1.0.0.
 	.OUTPUTS
 		Exit code.
 	#>
@@ -64,8 +73,20 @@ function Invoke-EvpPrePhase {
 	$stage = 'Veeam'
 	$veeam = $null
 	$resolved = [System.Collections.Generic.List[object]]::new()
+	# Shares this run cannot protect: VeeamPath -> { Reason, Category, Repointable }.
+	$failed = [ordered]@{}
+	$perShare = ($Config.Behaviour.FailSafeScope -eq 'Share')
 	$statePath = Get-EvpStatePath -Config $Config -Platform $Platform
 	$state = Read-EvpState -Path $statePath -JobId $Config.Veeam.JobId
+	function Add-Failure($Share, [string] $Category, [string] $Reason, [bool] $Repointable = $true) {
+		if ($failed.Contains($Share.VeeamPath)) { return }
+		# Scope Job: the first failure stops the phase and the catch below fail-safes every share.
+		# A share missing from the inventory is only recorded; all of them are reported at once.
+		if (-not $perShare -and $Repointable) { Set-Variable -Name stage -Scope 1 -Value $Category; throw "$($Share.VeeamPath): $Reason" }
+		$failed[$Share.VeeamPath] = [pscustomobject]@{ Reason = $Reason; Category = $Category; Repointable = $Repointable }
+		$outcome = if (-not $Repointable) { '' } else { switch ($Config.Behaviour.OnFailure) { 'FailSafe' { ' and gets the fail-safe path' } 'LiveFallback' { ' and falls back to a LIVE backup' } default { '' } } }
+		Write-Warning "Share '$($Share.VeeamPath)' is not protected this run$($outcome): $Reason"
+	}
 	try {
 		Write-EvpSection 'Veeam'
 		$veeam = Connect-EvpVeeam -Config $Config -Platform $Platform
@@ -73,21 +94,22 @@ function Invoke-EvpPrePhase {
 		$job = Assert-EvpVeeamJobSession -Session $veeam -Config $Config -Phase 'pre' -WarnOnly:$WhatIfPreference
 		$inventory = Get-EvpVeeamShares -Session $veeam
 
-		# Resolve every share before touching anything: a typo must not leave an orphan snapshot.
-		# Every miss is reported, and the fail-safe below still covers the shares that were found.
+		# Resolve every share in the inventory before touching anything. A share Veeam does not
+		# know cannot be repointed at all, not even to the fail-safe path.
 		$stage = 'Share'
 		$shares = @(Get-EvpRunShares -Config $Config -Job $job)
-		$misses = [System.Collections.Generic.List[string]]::new()
 		foreach ($share in $shares) {
-			try { $entry = Find-EvpVeeamShare -Shares $inventory -VeeamPath $share.VeeamPath } catch { $misses.Add($_.Exception.Message); continue }
+			try { $entry = Find-EvpVeeamShare -Shares $inventory -VeeamPath $share.VeeamPath } catch { Add-Failure $share 'Share' $_.Exception.Message $false; continue }
 			Write-Host "Share '$($share.VeeamPath)': $($entry.TypeName), mode $($entry.ProcessingMode), failover $($entry.FailoverEnabled), path '$($entry.StorageSnapshotPath)'"
 			$resolved.Add([pscustomobject]@{ Config = $share; Inventory = $entry; Group = $null; Applied = $null })
 		}
-		if ($misses.Count -gt 0) { throw ($misses -join ' ') }
+		if ($resolved.Count -eq 0) { throw "No share of this run is in the Veeam inventory: $(($failed.Values | ForEach-Object { $_.Reason }) -join ' ')" }
+		if (-not $perShare -and $failed.Count) { throw (($failed.Values | ForEach-Object { $_.Reason }) -join ' ') }
 
 		Write-EvpSection 'Arrays'
 		$stage = 'Array'
-		$plan = Connect-EvpArraysForShares -Config $Config -Platform $Platform -Shares $shares -State $state
+		$plan = Connect-EvpArraysForShares -Config $Config -Platform $Platform -Shares @($resolved | ForEach-Object { $_.Config }) -State $state -Tolerant:$perShare
+		foreach ($u in $plan.Unmapped) { Add-Failure $u.Share 'Array' $u.Reason }
 		foreach ($r in $resolved) {
 			$r.Group = $plan.Groups.Values | Where-Object { $_.Shares -contains $r.Config } | Select-Object -First 1
 		}
@@ -96,27 +118,38 @@ function Invoke-EvpPrePhase {
 		$stage = 'Snapshot'
 		# Every precondition first, so a problem on the last source does not leave snapshots
 		# behind on the first ones.
-		foreach ($g in $plan.Groups.Values) {
+		$usable = [ordered]@{}
+		foreach ($key in $plan.Groups.Keys) {
+			$g = $plan.Groups[$key]
 			if ($g.Session.Platform -eq 'FlashBlade' -and $g.SourceInfo.SnapshotDirectoryEnabled -eq $false) {
-				throw "FlashBlade file system '$($g.SourceName)' has its snapshot directory disabled; Veeam cannot read '.snapshot' on it. Enable it on the array."
+				foreach ($s in $g.Shares) { Add-Failure $s 'Snapshot' "FlashBlade file system '$($g.SourceName)' has its snapshot directory disabled; Veeam cannot read '.snapshot' on it. Enable it on the array." }
+				continue
 			}
+			$usable[$key] = $g
 		}
 		$timestamp = Get-EvpTimestamp
 		$created = @{}
-		foreach ($key in $plan.Groups.Keys) {
-			$g = $plan.Groups[$key]
+		foreach ($key in $usable.Keys) {
+			$g = $usable[$key]
 			$keepFor = if ($g.Session.Platform -eq 'FlashArray') { $Config.Snapshot.ArrayExpiryMs } else { 0 }
-			$created[$key] = New-EvpArraySnapshot -Session $g.Session -SourceName $g.SourceName -Tag $Config.Snapshot.Tag -Timestamp $timestamp -KeepForMs $keepFor -WhatIf:$WhatIfPreference
+			try {
+				$created[$key] = New-EvpArraySnapshot -Session $g.Session -SourceName $g.SourceName -Tag $Config.Snapshot.Tag -Timestamp $timestamp -KeepForMs $keepFor -WhatIf:$WhatIfPreference
+			} catch {
+				$message = "snapshot of '$($g.SourceName)' on '$($g.Array)' failed: $($_.Exception.Message)"
+				foreach ($s in $g.Shares) { Add-Failure $s 'Snapshot' $message }
+			}
 		}
 
 		Write-EvpSection 'Repoint shares'
 		$stage = 'Share'
 		foreach ($r in $resolved) {
-			$key = '{0}|{1}' -f $r.Group.Array, $r.Group.SourceName
-			$naming = $created[$key]
+			if ($failed.Contains($r.Config.VeeamPath) -or -not $r.Group) { continue }
+			$naming = $created['{0}|{1}' -f $r.Group.Array, $r.Group.SourceName]
 			$path = Get-EvpStorageSnapshotPath -VeeamPath $r.Config.VeeamPath -SnapshotDirectoryName $naming.DirectoryName -SnapshotRootDirName $Config.Snapshot.SnapshotRootDirName
-			$r.Applied = Set-EvpVeeamStorageSnapshotPath -Session $veeam -Share $r.Inventory -StorageSnapshotPath $path -EnsureProcessingMode $Config.Behaviour.EnsureProcessingMode -WhatIf:$WhatIfPreference
+			try { $r.Applied = Set-EvpVeeamStorageSnapshotPath -Session $veeam -Share $r.Inventory -StorageSnapshotPath $path -EnsureProcessingMode $Config.Behaviour.EnsureProcessingMode -WhatIf:$WhatIfPreference }
+			catch { Add-Failure $r.Config 'Share' "repointing failed: $($_.Exception.Message)" }
 		}
+		$failSafed = Set-EvpFailSafePaths -Config $Config -Session $veeam -Resolved @($resolved | Where-Object { $failed.Contains($_.Config.VeeamPath) -and $failed[$_.Config.VeeamPath].Repointable })
 
 		# Sweep: tagged snapshots older than KeepFor (all of them when KeepFor is 'none'), except
 		# the one just created. Catches whatever a missed post phase left behind, also on sources
@@ -131,7 +164,7 @@ function Invoke-EvpPrePhase {
 				$all = Get-EvpArraySnapshots -Session $g.Session -SourceName $g.SourceName
 				$old = @($all | Where-Object {
 						$ts = Get-EvpSnapshotTimestamp -Name $_.Name -Tag $Config.Snapshot.Tag
-						$ts -and $ts -lt $cutoff -and $_.Name -ne $created[$key].ArrayName -and -not $_.Destroyed
+						$ts -and $ts -lt $cutoff -and (-not $created.ContainsKey($key) -or $_.Name -ne $created[$key].ArrayName) -and -not $_.Destroyed
 					})
 				Write-Host "$($g.Session.Platform) '$($g.SourceName)': $($all.Count) snapshot(s), $($old.Count) matching '$($Config.Snapshot.Tag)' and older than the cut-off."
 				if ($old.Count -gt 0) {
@@ -149,8 +182,19 @@ function Invoke-EvpPrePhase {
 		Save-EvpState -Path $statePath -Config $Config -Job $job -Shares $plan.Shares -Sources (@(Get-EvpPlanSources -Plan $plan) + @($orphanResult.Remaining)) -WhatIf:$WhatIfPreference
 
 		Write-Host ''
-		Write-Host 'Pre-backup phase completed. Veeam will read:'
-		foreach ($r in $resolved) { Write-Host "  $($r.Config.VeeamPath)  <-  $($r.Applied)" }
+		$protected = @($resolved | Where-Object { $_.Applied })
+		if ($protected.Count) {
+			Write-Host "Pre-backup phase completed$(if ($failed.Count) { ' for part of the job' }). Veeam will read:"
+			foreach ($r in $protected) { Write-Host "  $($r.Config.VeeamPath)  <-  $($r.Applied)" }
+		}
+		if ($failed.Count) {
+			$how = if ($Config.Behaviour.OnFailure -eq 'LiveFallback') { 'are backed up LIVE (live fallback)' } else { 'fail visibly on the fail-safe path' }
+			Write-Host "Not protected this run ($($failed.Count) share(s))$(if ($failSafed) { "; $failSafed of them $how" }):"
+			foreach ($k in $failed.Keys) { Write-Host "  $k  ($($failed[$k].Category): $($failed[$k].Reason))" }
+			if ($protected.Count) { return $script:EvpExitCode.PartialFailSafe }
+			if ($failSafed) { return $script:EvpExitCode.FailSafe }
+			return $script:EvpExitCode[@($failed.Values)[0].Category]
+		}
 		if ($sweepFailed) { Write-Warning 'The sweep reported failures (see above); the backup itself is set up.'; return $script:EvpExitCode.Partial }
 		return $script:EvpExitCode.Success
 	} catch {
@@ -158,25 +202,51 @@ function Invoke-EvpPrePhase {
 		Write-Host "Pre-backup phase FAILED during stage '$stage': $($_.Exception.Message)"
 		Write-Verbose $_.ScriptStackTrace
 		$code = $script:EvpExitCode[$stage]
-		if ($resolved.Count -gt 0 -and $Config.Behaviour.FailSafePath -and $veeam) {
-			$sentinel = Get-EvpSentinelDirectoryName
-			$applied = 0
-			foreach ($r in $resolved) {
-				try {
-					$path = Get-EvpStorageSnapshotPath -VeeamPath $r.Config.VeeamPath -SnapshotDirectoryName $sentinel -SnapshotRootDirName $Config.Snapshot.SnapshotRootDirName
-					$null = Set-EvpVeeamStorageSnapshotPath -Session $veeam -Share $r.Inventory -StorageSnapshotPath $path -EnsureProcessingMode $true -WhatIf:$WhatIfPreference
-					$applied++
-				} catch { Write-Warning "Could not apply the fail-safe path to '$($r.Config.VeeamPath)': $($_.Exception.Message)" }
-			}
-			if ($applied -gt 0) {
-				Write-Host "Fail-safe applied to $applied share(s): they now point at a non-existent snapshot path with failover off, so the job fails visibly instead of backing up stale or live data. A successful pre-backup run restores them."
-				$code = $script:EvpExitCode.FailSafe
-			}
-		}
+		if ($veeam -and (Set-EvpFailSafePaths -Config $Config -Session $veeam -Resolved @($resolved)) -gt 0) { $code = $script:EvpExitCode.FailSafe }
 		return $code
 	} finally {
 		if ($veeam) { Disconnect-EvpVeeam -Session $veeam }
 	}
+}
+
+function Set-EvpFailSafePaths {
+	<#
+	.SYNOPSIS
+		Applies Behaviour.OnFailure to shares this run cannot back up from a fresh snapshot.
+	.DESCRIPTION
+		FailSafe: a non-existent snapshot path with failover off, so the backup fails visibly
+		instead of reading stale or live data. LiveFallback: the same path with Veeam's failover to
+		direct backup on, so Veeam backs up the live share and only warns. None: nothing.
+	.OUTPUTS
+		The number of shares OnFailure was applied to.
+	#>
+	[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSShouldProcess', '',
+		Justification = 'Changes nothing itself; -WhatIf is forwarded to Set-EvpVeeamStorageSnapshotPath, which asks ShouldProcess per share.')]
+	[CmdletBinding(SupportsShouldProcess)]
+	[OutputType([int])]
+	param(
+		[Parameter(Mandatory)] $Config,
+		[Parameter(Mandatory)] $Session,
+		[Parameter(Mandatory)] [AllowEmptyCollection()] [object[]] $Resolved
+	)
+	if ($Resolved.Count -eq 0 -or $Config.Behaviour.OnFailure -eq 'None') { return 0 }
+	$live = ($Config.Behaviour.OnFailure -eq 'LiveFallback')
+	$sentinel = Get-EvpSentinelDirectoryName
+	$applied = 0
+	foreach ($r in $Resolved) {
+		try {
+			$path = Get-EvpStorageSnapshotPath -VeeamPath $r.Config.VeeamPath -SnapshotDirectoryName $sentinel -SnapshotRootDirName $Config.Snapshot.SnapshotRootDirName
+			$null = Set-EvpVeeamStorageSnapshotPath -Session $Session -Share $r.Inventory -StorageSnapshotPath $path -EnsureProcessingMode $true -Failover $live -WhatIf:$WhatIfPreference
+			$r.Applied = $null
+			$applied++
+		} catch { Write-Warning "Could not apply OnFailure '$($Config.Behaviour.OnFailure)' to '$($r.Config.VeeamPath)': $($_.Exception.Message)" }
+	}
+	if ($applied -gt 0 -and $live) {
+		Write-Warning "LIVE FALLBACK for $applied share(s): they point at a non-existent snapshot path with failover to direct backup ON, so Veeam backs up the LIVE share and only warns. That backup is not crash-consistent. A successful pre-backup run restores the snapshot path."
+	} elseif ($applied -gt 0) {
+		Write-Host "Fail-safe applied to $applied share(s): they now point at a non-existent snapshot path with failover off, so their backup fails visibly instead of backing up stale or live data. A successful pre-backup run restores them."
+	}
+	return $applied
 }
 
 function Invoke-EvpPostPhase {
@@ -224,7 +294,7 @@ function Invoke-EvpPostPhase {
 				try {
 					$entry = Find-EvpVeeamShare -Shares $inventory -VeeamPath $share.VeeamPath
 					$path = Get-EvpStorageSnapshotPath -VeeamPath $share.VeeamPath -SnapshotDirectoryName $sentinel -SnapshotRootDirName $Config.Snapshot.SnapshotRootDirName
-					$null = Set-EvpVeeamStorageSnapshotPath -Session $veeam -Share $entry -StorageSnapshotPath $path -EnsureProcessingMode $true -WhatIf:$WhatIfPreference
+					$null = Set-EvpVeeamStorageSnapshotPath -Session $veeam -Share $entry -StorageSnapshotPath $path -EnsureProcessingMode $true -Failover ($Config.Behaviour.OnFailure -eq 'LiveFallback') -WhatIf:$WhatIfPreference
 				} catch {
 					Write-Warning "Could not disarm '$($share.VeeamPath)': $($_.Exception.Message)"
 					$disarmFailed++
@@ -407,6 +477,11 @@ function Invoke-EvpVerifyPhase {
 	}
 	foreach ($o in @(Get-EvpOrphanSources -State $state -Config $Config -Plan $plan)) {
 		Write-Host "     source '$($o.Source)' on '$($o.Array)' is no longer used; the next run cleans up its tagged snapshots"
+	}
+	if ($Config.Behaviour.OnFailure -eq 'LiveFallback') {
+		Write-Warning "Behaviour.OnFailure is 'LiveFallback': a share that cannot be backed up from a snapshot is backed up live, which is not crash-consistent and shows only as a Veeam warning."
+	} elseif ($Config.Behaviour.OnFailure -eq 'None') {
+		Write-Warning "Behaviour.OnFailure is 'None': a share that cannot be backed up from a fresh snapshot keeps its last path; watch the job warnings."
 	}
 
 	Write-EvpSection 'Result'

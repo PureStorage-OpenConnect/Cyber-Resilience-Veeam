@@ -34,6 +34,12 @@ function Get-HttpCalls { Read-CallLog -Path $httpLog }
 function Get-VeeamCalls { Read-CallLog -Path $env:EVP_TEST_CALLLOG }
 function Use-LabMock { param($State) Set-EvpHttpInvoker (New-EvpMockResponder -Routes (New-LabRoutes -State $State) -CallLog $httpLog) }
 function Get-Token([string] $Value) { ConvertTo-SecureString -String $Value -AsPlainText -Force }
+# ---------------------------------------------------------------------------------------------
+function Invoke-Captured([scriptblock] $ScriptBlock) {
+	<# Runs a phase, returning its exit code and everything it wrote to the host as text. #>
+	$all = @(& $ScriptBlock 6>&1 3>&1)
+	[pscustomobject]@{ Code = ($all | Where-Object { $_ -is [int] } | Select-Object -Last 1); Text = (($all | Where-Object { $_ -isnot [int] } | ForEach-Object { "$_" }) -join "`n") }
+}
 
 $faConfig = [ordered]@{ Name = 'fa'; Endpoint = 'fa'; ApiTokenFile = ''; Platform = 'auto'; Tls = 'skip' }
 $fbConfig = [ordered]@{ Name = 'fb'; Endpoint = 'fb'; ApiTokenFile = ''; Platform = 'auto'; Tls = 'skip' }
@@ -243,31 +249,67 @@ Assert-Equal 'no POST/PATCH' @(Get-HttpCalls | Where-Object { $_.Method -in 'POS
 Assert-Equal 'no Set-VBR*' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 0
 Assert-True 'still read inventory and exports' ((Get-HttpCalls | Where-Object Uri -like '*directory-exports*').Count -gt 0)
 
-Write-TestSection 'Pre phase: array failure applies the fail-safe'
+Write-TestSection 'Pre phase: an unreachable array fails only its shares'
+$sentinelPattern = '\.snapshot[\\/]__everpure-pre-backup-failed-\d{8}T\d{6}Z__$'
 $state = New-LabState; $state.FaLoginStatus = 401; Use-LabMock $state; Reset-Logs
 $rc = Invoke-EvpPrePhase -Config $config -Platform $platform 6>$null 3>$null
-Assert-Equal 'exit 10' $rc 10
+Assert-Equal 'exit 11 (partial: some shares fail-safe)' $rc 11
 $sets = @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*')
-Assert-Equal 'sentinel on all four shares' $sets.Count 4
-Assert-True 'sentinel path' (-not ($sets | Where-Object { $_.StorageSnapshotPath -notmatch '\.snapshot[\\/]__everpure-pre-backup-failed-\d{8}T\d{6}Z__$' }))
-Assert-True 'sentinel keeps separators' (($sets | Where-Object Path -like '\\*').StorageSnapshotPath -like '\\*\.snapshot\__*')
-Assert-True 'sentinel failover off, mode enforced' (-not ($sets | Where-Object { $_.Failover -or $_.Mode -ne 'StorageSnapshot' }))
-Assert-Equal 'no snapshot created' @(Get-HttpCalls | Where-Object { $_.Method -eq 'POST' -and $_.Uri -like '*snapshots*' }).Count 0
+$sentinels = @($sets | Where-Object { $_.StorageSnapshotPath -match $sentinelPattern })
+Assert-Equal 'sentinel on the three FlashArray shares' (($sentinels | ForEach-Object { $_.Path } | Sort-Object) -join ',') (('192.0.2.10:/shared', '\\192.0.2.10\finance-smb', '\\192.0.2.10\shared' | Sort-Object) -join ',')
+Assert-True  'sentinel keeps separators' (($sentinels | Where-Object Path -like '\\*').StorageSnapshotPath -like '\\*\.snapshot\__*')
+Assert-True  'sentinel failover off, mode enforced' (-not ($sentinels | Where-Object { $_.Failover -or $_.Mode -ne 'StorageSnapshot' }))
+$fbSet = @($sets | Where-Object Path -eq '192.0.2.20:/projects-nfs')
+Assert-True  'the FlashBlade share still backs up from its snapshot' ($fbSet.Count -eq 1 -and $fbSet[0].StorageSnapshotPath -match 'projects-nfs\.Veeam-Backup-\d{8}T\d{6}Z$' -and -not $fbSet[0].Failover)
+Assert-Equal 'only the FlashBlade snapshot created' (@(Get-HttpCalls | Where-Object { $_.Method -eq 'POST' -and $_.Uri -like '*snapshots*' }) | ForEach-Object { ([uri]$_.Uri).Host }) 'fb'
 
-Write-TestSection 'Pre phase: fail-safe can be turned off'
+Write-TestSection 'Pre phase: FailSafeScope Job keeps the 1.0.0 all-or-nothing behaviour'
+$jobScope = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'scope-job') -Overrides @{ Behaviour = @{ FailSafeScope = 'job' } })
+Assert-Equal 'scope normalised' $jobScope.Behaviour.FailSafeScope 'Job'
+$state = New-LabState; $state.FaLoginStatus = 401; Use-LabMock $state; Reset-Logs
+$rc = Invoke-EvpPrePhase -Config $jobScope -Platform $platform 6>$null 3>$null
+Assert-Equal 'scope Job: exit 10' $rc 10
+Assert-Equal 'scope Job: sentinel on all four shares' @(Get-VeeamCalls | Where-Object { $_.Cmdlet -like 'Set-*' -and $_.StorageSnapshotPath -match $sentinelPattern }).Count 4
+Assert-Equal 'scope Job: no snapshot created' @(Get-HttpCalls | Where-Object { $_.Method -eq 'POST' -and $_.Uri -like '*snapshots*' }).Count 0
+
+Write-TestSection 'Pre phase: OnFailure None (1.0.0 FailSafePath false) leaves failed shares alone'
 $noFs = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'nofs') -Overrides @{ Behaviour = @{ FailSafePath = $false } })
+Assert-Equal 'FailSafePath false means OnFailure None' $noFs.Behaviour.OnFailure 'None'
 $state = New-LabState; $state.FaLoginStatus = 401; Use-LabMock $state; Reset-Logs
 $rc = Invoke-EvpPrePhase -Config $noFs -Platform $platform 6>$null 3>$null
-Assert-Equal 'exit 4 (array)' $rc 4
-Assert-Equal 'no Set calls' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 0
+Assert-Equal 'exit 11' $rc 11
+Assert-Equal 'only the working share is set' ((@(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*') | ForEach-Object { $_.Path }) -join ',') '192.0.2.20:/projects-nfs'
+$state = New-LabState; $state.FaLoginStatus = 401; $state.FbSnapshotDirEnabled = $false; Use-LabMock $state; Reset-Logs
+$rc = Invoke-EvpPrePhase -Config $noFs -Platform $platform 6>$null 3>$null
+Assert-Equal 'nothing protected, nothing applied: exit of the first failure (array)' $rc 4
 
-Write-TestSection 'Pre phase: missing share is fatal before any snapshot'
+Write-TestSection 'Pre phase: OnFailure LiveFallback lets Veeam back up the live share'
+$liveCfg = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'live') -Overrides @{ Behaviour = @{ OnFailure = 'livefallback' } })
+Assert-Equal 'OnFailure normalised' $liveCfg.Behaviour.OnFailure 'LiveFallback'
+Assert-Throws 'OnFailure validated' { Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'live-bad') -Overrides @{ Behaviour = @{ OnFailure = 'Pray' } }) } 'Behaviour.OnFailure must be'
+$state = New-LabState; $state.FaLoginStatus = 401; Use-LabMock $state; Reset-Logs
+$r = Invoke-Captured { Invoke-EvpPrePhase -Config $liveCfg -Platform $platform }
+Assert-Equal 'live fallback: exit 11' $r.Code 11
+$sets = @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*')
+Assert-True  'live fallback: failed shares get the unreadable path with failover ON' (@($sets | Where-Object { $_.StorageSnapshotPath -match $sentinelPattern -and $_.Failover }).Count -eq 3)
+Assert-True  'live fallback: the snapshot share keeps failover off' (-not ($sets | Where-Object { $_.Path -eq '192.0.2.20:/projects-nfs' -and $_.Failover }))
+Assert-True  'live fallback: loudly reported' ($r.Text -match 'LIVE FALLBACK for 3 share')
+Reset-Logs
+$rc = Invoke-EvpPostPhase -Config $liveCfg -Platform $platform 6>$null 3>$null
+Assert-True  'live fallback: the post phase disarms with failover ON too' (-not (Get-VeeamCalls | Where-Object { $_.Cmdlet -like 'Set-*' -and -not $_.Failover }))
+
+Write-TestSection 'Pre phase: a share missing from the inventory fails alone'
 $missing = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'missing') -Overrides @{ Shares = @(@{ VeeamPath = '\\192.0.2.10\finance-smb'; Array = 'fa' }, @{ VeeamPath = '\\192.0.2.10\does-not-exist'; Array = 'fa' }) })
 $state = New-LabState; Use-LabMock $state; Reset-Logs
 $rc = Invoke-EvpPrePhase -Config $missing -Platform $platform 6>$null 3>$null
-Assert-Equal 'exit 10 (sentinel on the resolved share)' $rc 10
-Assert-Equal 'no array call at all' @(Get-HttpCalls).Count 0
-Assert-Equal 'one sentinel' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 1
+Assert-Equal 'exit 11' $rc 11
+$sets = @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*')
+Assert-True  'the known share backs up from its snapshot' ($sets.Count -eq 1 -and $sets[0].Path -eq '\\192.0.2.10\finance-smb' -and $sets[0].StorageSnapshotPath -notmatch $sentinelPattern)
+$missingJob = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'missing-job') -Overrides @{ Shares = @(@{ VeeamPath = '\\192.0.2.10\finance-smb'; Array = 'fa' }, @{ VeeamPath = '\\192.0.2.10\does-not-exist'; Array = 'fa' }); Behaviour = @{ FailSafeScope = 'Job' } })
+Reset-Logs
+$rc = Invoke-EvpPrePhase -Config $missingJob -Platform $platform 6>$null 3>$null
+Assert-Equal 'scope Job: exit 10 (sentinel on the known share)' $rc 10
+Assert-Equal 'scope Job: no array call at all' @(Get-HttpCalls).Count 0
 
 Write-TestSection 'Pre phase: Veeam connection failure'
 $env:EVP_TEST_CONNECT_FAIL = '1'
@@ -276,11 +318,13 @@ $rc = Invoke-EvpPrePhase -Config $config -Platform $platform 6>$null 3>$null
 Assert-Equal 'exit 2' $rc 2
 $env:EVP_TEST_CONNECT_FAIL = $null
 
-Write-TestSection 'Pre phase: FlashBlade snapshot directory disabled'
+Write-TestSection 'Pre phase: FlashBlade snapshot directory disabled fails only that source'
 $state = New-LabState; $state.FbSnapshotDirEnabled = $false; Use-LabMock $state; Reset-Logs
 $rc = Invoke-EvpPrePhase -Config $config -Platform $platform 6>$null 3>$null
-Assert-Equal 'exit 10' $rc 10
-Assert-Equal 'no snapshot created before the check' @(Get-HttpCalls | Where-Object { $_.Method -eq 'POST' -and $_.Uri -like '*snapshots*' }).Count 0
+Assert-Equal 'exit 11' $rc 11
+Assert-Equal 'no FlashBlade snapshot created' @(Get-HttpCalls | Where-Object { $_.Method -eq 'POST' -and $_.Uri -like 'https://fb/*snapshots*' }).Count 0
+Assert-Equal 'the FlashArray sources are snapshotted' @(Get-HttpCalls | Where-Object { $_.Method -eq 'POST' -and $_.Uri -like 'https://fa/*snapshots*' }).Count 2
+Assert-True  'the FlashBlade share gets the sentinel' (@(Get-VeeamCalls | Where-Object { $_.Path -eq '192.0.2.20:/projects-nfs' -and $_.StorageSnapshotPath -match $sentinelPattern }).Count -eq 1)
 
 # ---------------------------------------------------------------------------------------------
 Write-TestSection 'Job guard (Veeam.JobId): PowerShell backend'
@@ -353,15 +397,6 @@ $rc = Invoke-EvpVerifyPhase -Config $restBound -Platform $platform 6>$null 3>$nu
 Assert-Equal 'REST: verify passes (no object comparison)' $rc 0
 
 # ---------------------------------------------------------------------------------------------
-function Invoke-Captured([scriptblock] $ScriptBlock) {
-	<# Runs a phase, returning its exit code and everything it wrote to the host as text. #>
-	$all = @(& $ScriptBlock 6>&1 3>&1)
-	[pscustomobject]@{ Code = ($all | Where-Object { $_ -is [int] } | Select-Object -Last 1); Text = (($all | Where-Object { $_ -isnot [int] } | ForEach-Object { "$_" }) -join "`n") }
-}
-function Write-StateFile([string] $Directory, [string] $ProfileName, $Document) {
-	Write-TestFile -Path (Join-Path $Directory "state/$ProfileName.state.json") -Content ($Document | ConvertTo-Json -Depth 6)
-}
-
 Write-TestSection 'Discovery: file interfaces and host addresses'
 $state = New-LabState; Use-LabMock $state; Reset-Logs
 $fa = Connect-EvpArray -ArrayConfig $faConfig -ApiToken (Get-Token 'fa-token') 6>$null
@@ -768,6 +803,10 @@ $orchestrate = Get-Content (Join-Path $projectRoot 'lib/Orchestrate.ps1') -Raw
 Assert-True 'New-EvpArraySnapshot forwards WhatIf' ($orchestrate -match 'New-EvpArraySnapshot[^\n]*-WhatIf:\$WhatIfPreference')
 Assert-True 'Set-EvpVeeamStorageSnapshotPath forwards WhatIf' ($orchestrate -match 'Set-EvpVeeamStorageSnapshotPath[^\n]*-WhatIf:\$WhatIfPreference')
 Assert-True 'Remove-EvpArraySnapshots forwards WhatIf' ($orchestrate -match 'Remove-EvpArraySnapshots[^\n]*-WhatIf:\$WhatIfPreference')
+# ForEach-Object <Member> honours -WhatIf: in a dry run it prints "What if: Retrieve the value
+# for property" and returns nothing, which once made the pre phase dry run see no shares.
+$memberForm = @(Get-ChildItem (Join-Path $projectRoot 'lib'), $projectRoot -Filter '*.ps1' -File | Select-String -Pattern 'ForEach-Object [A-Za-z]' | ForEach-Object { "$($_.Filename):$($_.LineNumber)" })
+Assert-Equal 'no ForEach-Object <Member> in the product code' ($memberForm -join ', ') ''
 
 Set-EvpHttpInvoker $null
 Remove-Item -LiteralPath $tmp -Recurse -Force -ErrorAction SilentlyContinue

@@ -97,10 +97,26 @@
 	},
 
 	"Behaviour": {
-		// On a pre-phase failure, point every resolved share at a non-existent snapshot path with
-		// failover off, so the job fails instead of backing up stale or live data. Veeam only
-		// warns when a pre-job script fails. Turn off only if you watch for those warnings.
-		"FailSafePath": true,
+		// What a share gets when this run cannot back it up from a fresh snapshot (Veeam only
+		// warns when a pre-job script fails, so the script itself must make the outcome safe):
+		//   "FailSafe"      (default) a non-existent snapshot path with failover off: the share's
+		//                   backup fails visibly instead of reading stale or live data.
+		//   "LiveFallback"  the same path with Veeam's failover to direct backup on: Veeam backs
+		//                   up the live share instead and reports only a warning. Any backup
+		//                   beats none, but it is not crash-consistent, and nothing but those
+		//                   warnings shows that it was not a snapshot backup.
+		//   "None"          leave the share as it is (1.0.0 "FailSafePath": false). It keeps its
+		//                   last path, which normally is the post phase's disarm path.
+		// The post phase disarms the shares the same way, so a next pre phase that fails before
+		// it gets this far behaves the same.
+		"OnFailure": "FailSafe",
+
+		// What one failure takes down. "Share" (default): only the shares it concerns (an
+		// unmapped share, an unreachable array, a failed snapshot of one source) get OnFailure;
+		// every other share still backs up from its snapshot, and the run exits 11. "Job": any
+		// failure applies OnFailure to every share, as in 1.0.0, for jobs whose shares must come
+		// from one consistent point in time or not at all.
+		"FailSafeScope": "Share",
 
 		// Also set the share's processing mode to "backup from storage snapshot at this path".
 		// Required for the path (and the fail-safe) to have any effect; leave it on.
