@@ -684,6 +684,13 @@ $rc = Invoke-EvpVerifyPhase -Config $config -Platform $platform 6>$null 3>$null
 Assert-Equal 'verify passes' $rc 0
 Assert-Equal 'verify changes nothing' @(Get-HttpCalls | Where-Object { $_.Method -in 'POST', 'PATCH', 'PUT' -and $_.Uri -notlike '*/login' }).Count 0
 Assert-Equal 'verify no Set' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 0
+$state = New-LabState
+$state.FbSnapshots = @(
+	@{ name = 'projects-nfs.Veeam-Backup-20200101T000000Z'; source = @{ name = 'projects-nfs' }; destroyed = $false },
+	@{ name = 'projects-nfs.Veeam-Backup-20200102T000000Z'; source = @{ name = 'projects-nfs' }; destroyed = $true })
+Use-LabMock $state
+$r = Invoke-Captured { Invoke-EvpVerifyPhase -Config $config -Platform $platform }
+Assert-True  'verify counts destroyed snapshots apart' ($r.Text -match "1 existing snapshot\(s\) of 'projects-nfs' carry tag 'Veeam-Backup'; 1 more destroyed, awaiting eradication")
 $state = New-LabState; $state.FbSnapshotDirEnabled = $false; Use-LabMock $state
 $rc = Invoke-EvpVerifyPhase -Config $missing -Platform $platform 6>$null 3>$null
 Assert-Equal 'verify reports first problem category (share)' $rc 3

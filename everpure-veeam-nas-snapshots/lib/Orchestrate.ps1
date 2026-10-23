@@ -471,8 +471,11 @@ function Invoke-EvpVerifyPhase {
 			Add-Problem 'Snapshot' "FlashBlade file system '$($g.SourceName)' has its snapshot directory disabled"
 		}
 		try {
+			# Destroyed snapshots stay listed until the array eradicates them; the phases ignore them.
 			$existing = @(Get-EvpArraySnapshots -Session $g.Session -SourceName $g.SourceName | Where-Object { Get-EvpSnapshotTimestamp -Name $_.Name -Tag $Config.Snapshot.Tag })
-			Write-Host "     $($existing.Count) existing snapshot(s) of '$($g.SourceName)' carry tag '$($Config.Snapshot.Tag)'"
+			$live = @($existing | Where-Object { -not $_.Destroyed })
+			$gone = $existing.Count - $live.Count
+			Write-Host "     $($live.Count) existing snapshot(s) of '$($g.SourceName)' carry tag '$($Config.Snapshot.Tag)'$(if ($gone) { "; $gone more destroyed, awaiting eradication" })"
 		} catch { Write-Host "FAIL $($g.SourceName): $($_.Exception.Message)"; Add-Problem 'Array' $_.Exception.Message }
 	}
 	foreach ($o in @(Get-EvpOrphanSources -State $state -Config $Config -Plan $plan)) {
