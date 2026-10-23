@@ -568,6 +568,19 @@ Assert-Equal 'post destroyed both, through their contexts' (($state.FlSnapshots 
 $r = Invoke-Captured { Invoke-EvpVerifyPhase -Config $flCfg -Platform $platform }
 Assert-Equal 'verify passes with a fleet' $r.Code 0
 Assert-True  'verify lists the fleet and its members' ($r.Text -match "OK   fleet labfleet: 'LABFLEET'" -and $r.Text -match 'OK     member FLB' -and $r.Text -match 'member FBX skipped')
+# Orphans of an earlier run: one on a fleet member that needs its own entry (kept, exit 4, no
+# snapshot failure), one on an array that is configured nowhere any more (dropped).
+$flStatePath = Join-Path $flDir 'state/fleet-job.state.json'
+$doc = Get-Content $flStatePath -Raw | ConvertFrom-Json
+$doc.Sources = @($doc.Sources) + @([pscustomobject]@{ Array = 'FBX'; Platform = 'FlashBlade'; Source = 'fs-old' }, [pscustomobject]@{ Array = 'gone01'; Platform = 'FlashArray'; Source = 'x:y' })
+[System.IO.File]::WriteAllText($flStatePath, ($doc | ConvertTo-Json -Depth 6))
+Reset-Logs
+$r = Invoke-Captured { Invoke-EvpPostPhase -Config $flCfg -Platform $platform }
+Assert-Equal 'orphan on an unusable member: exit 4 (array), not 5' $r.Code 4
+Assert-True  'the reason is printed' ($r.Text -match "Source 'fs-old' of the last run on 'FBX' cannot be cleaned up now: .*other product.*Kept for the next run")
+Assert-True  'an orphan on an array configured nowhere is dropped' ($r.Text -match "Source 'x:y' of the last run was on array 'gone01', which is no longer configured")
+$doc = Get-Content $flStatePath -Raw | ConvertFrom-Json
+Assert-Equal 'state keeps the reachable-later orphan, drops the gone one' ((@($doc.Sources) | Where-Object { $_.Array -in 'FBX', 'gone01' } | ForEach-Object { $_.Array }) -join ',') 'FBX'
 $env:EVP_TEST_INVENTORY = $labInventory
 
 Write-TestSection 'File-to-tape job'

@@ -78,10 +78,12 @@ share on the fail-safe path, for jobs whose shares must come from one point in t
 **Snapshot or fail, or a live fallback.** `Behaviour.OnFailure` decides what a share that cannot
 be backed up from a fresh snapshot gets. `"FailSafe"` (default) is the unreadable path with
 failover off: the backup of that share fails. `"LiveFallback"` is opt-in: the same path with
-Veeam's failover to direct backup on, so Veeam backs up the live share and only warns. Any backup
-beats none, but a live backup is not crash-consistent and nothing except those warnings shows
-it. `"None"` leaves the share as it is (`FailSafePath: false` in 1.0.0). The post phase disarms
-the shares the same way.
+Veeam's failover to direct backup on, so Veeam backs up the live share. Any backup beats none,
+but a live backup is not crash-consistent, and Veeam itself does not say so: on 13.1.1.18 the
+share's task ends with Success and no warning of its own. Only the pre-job script's exit code
+11 (the job ends with a Warning) and its log ("LIVE FALLBACK for N share(s)", the share list at
+the end of the pre phase) show which shares were read live. `"None"` leaves the share as it is
+(`FailSafePath: false` in 1.0.0). The post phase disarms the shares the same way.
 
 **Why the post phase disarms the shares.** The fail-safe needs a working Veeam connection, so a
 pre phase that fails before it gets that far (Veeam unreachable, credentials expired, script

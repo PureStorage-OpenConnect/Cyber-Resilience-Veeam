@@ -410,9 +410,14 @@ function Invoke-EvpOrphanCleanup {
 	<#
 	.SYNOPSIS
 		Destroys this tag's snapshots older than the cut-off on sources the job no longer uses.
+	.DESCRIPTION
+		An orphan on an array that cannot be used right now (unreachable, or a fleet member that
+		needs an entry of its own) is kept for the next run and counted in Unreachable, not in
+		Failed: nothing failed to be destroyed. An orphan on an array that is no longer configured
+		at all is dropped from the state with a warning; its tagged snapshots stay on the array.
 	.OUTPUTS
 		Record with Remaining (orphans still holding tagged snapshots, or not checkable right now),
-		Destroyed and Failed.
+		Destroyed, Failed (snapshots that could not be listed or destroyed) and Unreachable.
 	#>
 	[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSShouldProcess', '',
 		Justification = 'Changes nothing itself; -WhatIf is forwarded to Remove-EvpArraySnapshots, which asks ShouldProcess per snapshot.')]
@@ -425,10 +430,22 @@ function Invoke-EvpOrphanCleanup {
 		[Parameter(Mandatory)] $Plan,
 		[Parameter(Mandatory)] [datetime] $Cutoff
 	)
-	$result = [pscustomobject]@{ Remaining = [System.Collections.Generic.List[object]]::new(); Destroyed = 0; Failed = 0 }
+	$result = [pscustomobject]@{ Remaining = [System.Collections.Generic.List[object]]::new(); Destroyed = 0; Failed = 0; Unreachable = 0 }
 	foreach ($o in $Orphans) {
 		$session = Open-EvpArraySession -Config $Config -Platform $Platform -Name $o.Array -Pool $Plan.Pool
-		if (-not $session) { $result.Remaining.Add($o); $result.Failed++; continue }
+		if (-not $session) {
+			# Known: a configured entry, or a fleet member (skipped ones included). Unknown is only
+			# certain when every fleet could be asked.
+			$pool = $Plan.Pool
+			$known = $Config.Arrays.Contains($o.Array) -or [bool]@($pool.Fleets.Values | Where-Object { $_.Members.Contains($o.Array) -or $_.Skipped.Contains($o.Array) }).Count
+			$fleetDown = [bool]@($Config.Arrays.Values | Where-Object { $_.Type -eq 'Fleet' -and $pool.Unreachable.Contains($_.Name) }).Count
+			if (-not $known -and -not $fleetDown) {
+				Write-Warning "Source '$($o.Source)' of the last run was on array '$($o.Array)', which is no longer configured; it is dropped from the state and its tagged snapshots stay."
+				continue
+			}
+			Write-Warning "Source '$($o.Source)' of the last run on '$($o.Array)' cannot be cleaned up now: $($pool.Unreachable[$o.Array]). Kept for the next run."
+			$result.Remaining.Add($o); $result.Unreachable++; continue
+		}
 		try {
 			$tagged = @(Get-EvpArraySnapshots -Session $session -SourceName $o.Source | Where-Object { -not $_.Destroyed -and (Get-EvpSnapshotTimestamp -Name $_.Name -Tag $Config.Snapshot.Tag) })
 		} catch {

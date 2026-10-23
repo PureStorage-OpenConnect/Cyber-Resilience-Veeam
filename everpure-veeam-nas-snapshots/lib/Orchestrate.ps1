@@ -178,7 +178,7 @@ function Invoke-EvpPrePhase {
 		}
 		$orphans = @(Get-EvpOrphanSources -State $state -Config $Config -Plan $plan)
 		$orphanResult = Invoke-EvpOrphanCleanup -Config $Config -Platform $Platform -Orphans $orphans -Plan $plan -Cutoff $cutoff -WhatIf:$WhatIfPreference
-		$sweepFailed += $orphanResult.Failed
+		$sweepFailed += $orphanResult.Failed + $orphanResult.Unreachable
 		Save-EvpState -Path $statePath -Config $Config -Job $job -Shares $plan.Shares -Sources (@(Get-EvpPlanSources -Plan $plan) + @($orphanResult.Remaining)) -WhatIf:$WhatIfPreference
 
 		Write-Host ''
@@ -340,7 +340,7 @@ function Invoke-EvpPostPhase {
 		# is unreachable right now. Kept in the state until nothing tagged is left on them.
 		$orphans = @(Get-EvpOrphanSources -State $state -Config $Config -Plan $plan)
 		$orphanResult = Invoke-EvpOrphanCleanup -Config $Config -Platform $Platform -Orphans $orphans -Plan $plan -Cutoff $keepCutoff -WhatIf:$WhatIfPreference
-		$destroyed += $orphanResult.Destroyed; $matched += $orphanResult.Destroyed; $failed += $orphanResult.Failed
+		$destroyed += $orphanResult.Destroyed; $matched += $orphanResult.Destroyed; $failed += $orphanResult.Failed; $arrayProblems = @($plan.Unmapped).Count + $orphanResult.Unreachable
 		$keptShares = @($plan.Shares) + @($state.Shares | Where-Object { $_ -and $_.VeeamPath -in @($plan.Unmapped | ForEach-Object { $_.Share.VeeamPath }) })
 		Save-EvpState -Path $statePath -Config $Config -Job $job -Shares $keptShares -Sources (@(Get-EvpPlanSources -Plan $plan) + @($orphanResult.Remaining)) -WhatIf:$WhatIfPreference
 
@@ -349,7 +349,7 @@ function Invoke-EvpPostPhase {
 			Write-Host "Destroyed $destroyed snapshot(s); $failed failure(s). Destroyed snapshots stay recoverable until the array's eradication delay expires."
 		} elseif ($tagged -gt 0) {
 			Write-Host "$tagged snapshot(s) carry tag '$($Config.Snapshot.Tag)', none older than $($Config.Snapshot.KeepFor). Nothing to destroy yet."
-		} elseif ($failed -eq 0 -and $plan.Unmapped.Count -eq 0) {
+		} elseif ($failed -eq 0 -and $arrayProblems -eq 0) {
 			$message = "No snapshots matching tag '$($Config.Snapshot.Tag)' were found on any source. Nothing to clean up."
 			if ($Config.Behaviour.FailIfNoSnapshots) { throw $message }
 			Write-Warning $message
@@ -357,7 +357,7 @@ function Invoke-EvpPostPhase {
 		if ($disarmFailed) { Write-Warning "$disarmFailed share(s) could not be disarmed (see above); they keep pointing at this run's snapshot path." }
 		Write-Host 'Post-backup phase completed.'
 		if ($failed -gt 0) { return $script:EvpExitCode.Snapshot }
-		if ($plan.Unmapped.Count -gt 0) { return $script:EvpExitCode.Array }
+		if ($arrayProblems -gt 0) { return $script:EvpExitCode.Array }
 		if ($disarmFailed -gt 0) { return $script:EvpExitCode.Partial }
 		return $script:EvpExitCode.Success
 	} catch {
