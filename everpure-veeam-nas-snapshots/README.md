@@ -67,7 +67,9 @@ an array of its own, under the name Purity gives it (`FA02`). Every call to a me
 `context_names`, and every answer must name that member. An answer for another array or none is
 refused, so a call can never act on the wrong array. A fleet cannot reach the other product
 (FlashBlades in a fleet of FlashArrays need their own entry), and a member with its own entry
-uses that entry.
+uses that entry. Give FlashBlades a plain entry each for now: Purity//FB 4.8 does not take
+`context_names` on `network-interfaces`, which discovery reads, so a fleet entry through a
+FlashBlade finds no interfaces and its shares get the fail-safe path.
 
 **ActiveCluster for File.** A realm VIP of a synchronously replicated pod is listed on both
 arrays of the pair. The array that reports itself `online` for the VIP serves the share; the

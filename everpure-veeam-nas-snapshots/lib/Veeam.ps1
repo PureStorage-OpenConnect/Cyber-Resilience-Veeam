@@ -417,6 +417,20 @@ function Set-EvpVeeamStorageSnapshotPath {
 
 #region Job binding (Veeam.JobId)
 
+function Get-EvpVeeamObjectLabel {
+	<#
+	.SYNOPSIS
+		Names a job object that has no path, for the list of skipped objects.
+	#>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param([Parameter(Mandatory)] $Object)
+	$kind = if ($Object.Server -and $Object.Server.Type) { [string]$Object.Server.Type } else { $Object.GetType().Name }
+	$name = if ($Object.Server -and $Object.Server.Name) { [string]$Object.Server.Name } elseif ($Object.Name) { [string]$Object.Name } else { $null }
+	if ($name) { return "$name ($kind)" }
+	return "$kind object without a path"
+}
+
 function Get-EvpVeeamJob {
 	<#
 	.SYNOPSIS
@@ -428,6 +442,8 @@ function Get-EvpVeeamJob {
 		BackupObject[].Server.Path. File-to-tape: Get-VBRTapeJob has no -Id, so all tape jobs are
 		listed and filtered; the share is Object[].Server.Name (Object[].Path carries an
 		'nfs41://' prefix for NFS). A sub-folder or single-file object resolves to its share.
+		An object without a path, such as the bucket of an object-storage-to-tape job (Veeam
+		types that job FileToTape too), is listed in Skipped by its server type.
 	.OUTPUTS
 		Record with Id, Name, Type, Kind ('FileBackup' or 'FileToTape'), Shares (Path, Protocol,
 		InventoryId per share, deduplicated), ShareRoots (their paths), Skipped (objects that
@@ -455,19 +471,19 @@ function Get-EvpVeeamJob {
 		$objects = if ($kind -eq 'FileBackup') {
 			@($job.BackupObject | ForEach-Object {
 					$path = if ($_.Server -and $_.Server.Path) { [string]$_.Server.Path } else { [string]$_.Path }
-					[pscustomobject]@{ Path = $path; InventoryId = if ($_.Server) { [string]$_.Server.Id } else { $null } }
+					[pscustomobject]@{ Path = $path; InventoryId = if ($_.Server) { [string]$_.Server.Id } else { $null }; Label = (Get-EvpVeeamObjectLabel $_) }
 				})
 		} else {
 			@($job.Object | ForEach-Object {
 					$path = if ($_.Server -and $_.Server.Name) { [string]$_.Server.Name } else { [string]$_.Path -replace '^nfs\d*://', '' }
-					[pscustomobject]@{ Path = $path; InventoryId = if ($_.Server) { [string]$_.Server.Id } else { $null } }
+					[pscustomobject]@{ Path = $path; InventoryId = if ($_.Server) { [string]$_.Server.Id } else { $null }; Label = (Get-EvpVeeamObjectLabel $_) }
 				})
 		}
 		$shares = [System.Collections.Generic.List[object]]::new()
 		$skipped = [System.Collections.Generic.List[string]]::new()
 		$seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 		foreach ($o in $objects) {
-			if (-not $o.Path) { continue }
+			if (-not $o.Path) { $skipped.Add($o.Label); continue }
 			$protocol = Get-EvpShareProtocol -VeeamPath $o.Path
 			if (-not $protocol) { $skipped.Add($o.Path); continue }
 			if (-not $seen.Add((Get-EvpNormalizedSharePath -VeeamPath $o.Path))) { continue }

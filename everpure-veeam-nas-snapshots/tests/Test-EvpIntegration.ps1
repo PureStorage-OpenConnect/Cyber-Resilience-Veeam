@@ -615,6 +615,15 @@ Assert-Equal 'tape: both shares repointed' @(Get-VeeamCalls | Where-Object Cmdle
 Reset-Logs
 $rc = Invoke-EvpPostPhase -Config $tapeCfg -Platform $platform 6>$null 3>$null
 Assert-Equal 'tape: post exit 0' $rc 0
+# Veeam types an object-storage-to-tape job FileToTape too; its bucket object has no path.
+$env:EVP_TEST_JOBS = ConvertTo-Json -Compress -Depth 4 -InputObject @(@{ Id = $tapeId; Name = 'to-tape'; Kind = 'FileToTape'; ShareRoots = $tapeRoots + '@S3CompatibleServer' })
+$tapeJob = Get-EvpVeeamJob -Session $session -JobId $tapeId
+Assert-Equal 'tape: shares beside a bucket object' ($tapeJob.ShareRoots -join ',') ($tapeRoots -join ',')
+Assert-Equal 'tape: bucket object listed as skipped' ($tapeJob.Skipped -join ',') 'S3CompatibleServer object without a path'
+$env:EVP_TEST_JOBS = ConvertTo-Json -Compress -Depth 4 -InputObject @(@{ Id = $tapeId; Name = 'to-tape'; Kind = 'FileToTape'; ShareRoots = @('@S3CompatibleServer') })
+Reset-Logs
+$r = Invoke-Captured { Invoke-EvpPrePhase -Config $tapeCfg -Platform $platform }
+Assert-True  'tape: bucket-only job refused, nothing repointed' ($r.Code -ne 0 -and $r.Text -match 'contains no SMB share or NFS export' -and -not @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count)
 $env:EVP_TEST_JOBS = $null; $env:EVP_TEST_SESSIONS = $null
 
 # ---------------------------------------------------------------------------------------------

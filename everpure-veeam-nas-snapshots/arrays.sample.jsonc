@@ -21,6 +21,8 @@
 //                 .\Protect-EverpureVeeamSecret.ps1 -Array fleet01 -Endpoint fa01.example.com -Fleet.
 //                 Fleets cannot reach the other product: list FlashBlades in a fleet of
 //                 FlashArrays separately. A member with an entry of its own uses that entry.
+//                 FlashArray endpoints only for now: Purity//FB 4.8 refuses context_names on
+//                 network-interfaces, so give each FlashBlade a plain entry.
 //   Endpoint      management address
 //   ApiTokenFile  file written by Protect-EverpureVeeamSecret.ps1. A relative path is relative to
 //                 the folder holding this file, which is the jobs folder (jobs/arrays.jsonc):

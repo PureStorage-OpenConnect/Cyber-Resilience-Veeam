@@ -26,11 +26,13 @@ declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start 
   run first. Tagged snapshots on the source of a share that has left the job are cleaned up by
   the sweep and the post phase until none is left.
 - **File-to-tape jobs.** The job guard, the share discovery and the generator's job lookup work
-  for file-to-tape jobs as well as file backup jobs.
+  for file-to-tape jobs as well as file backup jobs. Objects that are not shares, such as the
+  bucket of an object-storage-to-tape job, are reported and skipped.
 - **Fleets.** An `arrays.jsonc` entry with `"Type": "Fleet"` reaches every member of an Everpure
   fleet of the same product through one endpoint and one token (`context_names`). Every answer
   must name the member it was meant for; anything else is refused. `-Fleet` on the secrets
-  helper adds such an entry and lists the members.
+  helper adds such an entry and lists the members. FlashBlades need a plain entry each, since
+  Purity//FB 4.8 does not take `context_names` on `network-interfaces`.
 - **ActiveCluster for File.** When a realm VIP is listed on both arrays of a pair, the share
   maps to the array that reports itself `online` for it, also against the array of the last run.
 - **Failures stay with the shares they concern.** A share that cannot be mapped, whose array is
@@ -39,7 +41,8 @@ declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start 
   partial run. `Behaviour.FailSafeScope: "Job"` keeps the 1.0.0 all-or-nothing behaviour.
 - **Live fallback, opt-in.** `Behaviour.OnFailure: "LiveFallback"` gives a share that cannot be
   backed up from a snapshot Veeam's failover to direct backup, so the live share is backed up
-  with a warning instead of failing. `"FailSafe"` stays the default; `"None"` is the 1.0.0
+  instead of failing. Veeam reports that share as a success; only the scripts' exit codes turn
+  the job into a warning. `"FailSafe"` stays the default; `"None"` is the 1.0.0
   `FailSafePath: false`, which keeps working.
 - `Protect-EverpureVeeamSecret.ps1 -Array <name> -Endpoint <address>` adds the array to
   `arrays.jsonc` (keeping the file's comments), then stores and verifies its token. `-Array

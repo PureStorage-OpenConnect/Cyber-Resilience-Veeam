@@ -374,6 +374,9 @@ function Get-VBRTapeJob { param([string[]]$Name, $ErrorAction, $WarningAction)
 		if ($j.Kind -ne 'FileToTape') { continue }
 		if ($Name -and $Name[0] -ne $j.Name) { continue }
 		[pscustomobject]@{ Id = [guid]$j.Id; Name = [string]$j.Name; Type = 'FileToTape'; Object = @($j.ShareRoots | ForEach-Object {
+				# '@<server type>' models an object without a path, like the bucket of an
+				# object-storage-to-tape job (VBRObjectStorageBackupJobObject, Server.Type S3CompatibleServer).
+				if ($_ -like '@*') { return [pscustomobject]@{ Path = ''; Server = [pscustomobject]@{ Name = ''; Id = [guid]::Empty; Type = $_.Substring(1) } } }
 				$path = if ($_ -match '^[^\\]+:/') { "nfs41://$_" } else { $_ }
 				[pscustomobject]@{ Path = $path; Server = [pscustomobject]@{ Name = $_; Id = (Get-StubObjectId $_); Type = $(if ($_ -like '\\*') { 'CifsShare' } else { 'NfsShare' }) } } }) }
 	} }
