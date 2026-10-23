@@ -360,6 +360,16 @@ Assert-Equal 'four shares repointed' @(Get-VeeamCalls | Where-Object Cmdlet -lik
 Reset-Logs
 $rc = Invoke-EvpPostPhase -Config $bound -Platform $platform 6>$null 3>$null
 Assert-Equal 'post runs inside the job session' $rc 0
+# An active full names its session 'job (Full)': the guard must still find it (lab, 13.1.1.18).
+$env:EVP_TEST_SESSIONS = ConvertTo-Json -Compress -InputObject @(@{ Id = 'dddddddd-4444-4444-8444-00000000000f'; JobId = $jobId; Name = 'lab-job (Full)'; State = 'Postprocessing' })
+$rc = Invoke-EvpPostPhase -Config $bound -Platform $platform 6>$null 3>$null
+Assert-Equal 'post inside an active-full session (named "lab-job (Full)")' $rc 0
+$env:EVP_TEST_SESSIONS = ConvertTo-Json -Compress -InputObject @(@{ Id = 'dddddddd-4444-4444-8444-00000000000e'; JobId = $otherId; Name = 'lab-job-clone (Full)'; State = 'Working' })
+$rc = Invoke-EvpPostPhase -Config $bound -Platform $platform 6>$null 3>$null
+Assert-Equal 'a clone whose name starts the same is still refused (JobId decides)' $rc 2
+$env:EVP_TEST_SESSIONS = ConvertTo-Json -Compress -InputObject @(
+	@{ Id = 'cccccccc-3333-4333-8333-000000000003'; JobId = $jobId; Name = 'lab-job'; State = 'Stopped' },
+	@{ Id = 'dddddddd-4444-4444-8444-000000000004'; JobId = $jobId; Name = 'lab-job'; State = 'Working' })
 Assert-True 'post destroyed the run snapshots' (@(Get-HttpCalls | Where-Object Method -eq 'PATCH').Count -ge 1)
 # Unknown job ID (deleted and re-created job).
 $stale = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'stale') -Overrides @{ Veeam = @{ JobId = $otherId } })

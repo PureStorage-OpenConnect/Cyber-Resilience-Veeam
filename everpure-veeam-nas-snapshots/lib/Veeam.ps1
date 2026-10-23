@@ -527,10 +527,13 @@ function Get-EvpVeeamActiveJobSessions {
 	if ($Session.Backend -eq 'PowerShell') {
 		# Filtered by job: Get-VBRBackupSession without a filter walks every session on the server,
 		# and Get-VBRSession -Job warns that it does not support tape jobs.
+		# A session is named after the job plus the kind of run: 'files (Full)' for an active full
+		# on 13.1.1.18, so an exact -Name misses it. The name is a prefix match here, with the
+		# job's own wildcard characters escaped, and the JobId filter below decides.
 		$all = if ($Job.Kind -eq 'FileToTape') {
 			@(Get-VBRTapeBackupSession -Job $Job.Raw -ErrorAction SilentlyContinue -WarningAction SilentlyContinue)
 		} else {
-			@(Get-VBRUnstructuredBackupSession -Name $Job.Name -ErrorAction SilentlyContinue)
+			@(Get-VBRUnstructuredBackupSession -Name ('{0}*' -f [WildcardPattern]::Escape($Job.Name)) -ErrorAction SilentlyContinue)
 		}
 		return @($all | Where-Object { ([string]$_.JobId).ToLowerInvariant() -eq $Job.Id -and [string]$_.State -ne 'Stopped' } | ForEach-Object {
 				[pscustomobject]@{ Id = [string]$_.Id; State = [string]$_.State; CreationTime = $_.CreationTime } })

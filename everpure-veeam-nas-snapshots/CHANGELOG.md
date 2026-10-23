@@ -63,6 +63,9 @@ declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start 
   go on.
 - Fixed: a `-WhatIf` dry run of the pre phase saw no shares, because `ForEach-Object <Member>`
   honours `-WhatIf` and returned nothing.
+- Fixed (also in 1.0.0): the job guard refused the scripts of an active full run, because Veeam
+  names that session `<job> (Full)` and the session lookup matched the job name exactly. It now
+  matches the name as a prefix and decides by job ID.
 - The array API token also needs to read network interfaces (the `storage_admin` role does).
 
 ## [1.0.0] - 2026-10-22 <!-- style-check: ignore -->

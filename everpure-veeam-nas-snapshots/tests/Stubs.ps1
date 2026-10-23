@@ -378,9 +378,10 @@ function Get-VBRTapeJob { param([string[]]$Name, $ErrorAction, $WarningAction)
 				[pscustomobject]@{ Path = $path; Server = [pscustomobject]@{ Name = $_; Id = (Get-StubObjectId $_); Type = $(if ($_ -like '\\*') { 'CifsShare' } else { 'NfsShare' }) } } }) }
 	} }
 function Get-VBRUnstructuredBackupSession { param([string[]]$Name, $ErrorAction)
+	# -Name takes wildcards, like the real cmdlet; a session of an active full is named 'job (Full)'.
 	$sessions = @(); if ($env:EVP_TEST_SESSIONS) { $sessions = @($env:EVP_TEST_SESSIONS | ConvertFrom-Json) }
 	foreach ($s in $sessions) {
-		if ($Name -and $s.Name -notin $Name) { continue }
+		if ($Name -and -not ($Name | Where-Object { $s.Name -like $_ })) { continue }
 		[pscustomobject]@{ Id = [guid]$s.Id; JobId = [guid]$s.JobId; Name = [string]$s.Name; State = [string]$s.State; CreationTime = [datetime]'2026-01-01T00:00:00Z' }
 	} }
 function Get-VBRTapeBackupSession { param($Job, [string[]]$Name, $ErrorAction, $WarningAction)
