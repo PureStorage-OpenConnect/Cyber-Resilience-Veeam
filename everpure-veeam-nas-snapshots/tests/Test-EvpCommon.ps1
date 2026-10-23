@@ -127,7 +127,8 @@ Assert-Throws 'sample: a fresh arrays file asks for arrays' { Get-EvpConfig -Pat
 $null = Write-TestFile -Path (Join-Path $sampleDir 'arrays.jsonc') -Content ($arraysSample -replace '(?m)^(\s*)// (\{ "Name")', '$1$2')
 $sample = Get-EvpConfig -Path (Join-Path $sampleDir 'files.jsonc')
 Assert-Equal 'sample: no shares, they come from the job' $sample.Shares.Count 0
-Assert-Equal 'sample: arrays from the arrays file' $sample.Arrays.Count 2
+Assert-Equal 'sample: arrays from the arrays file' $sample.Arrays.Count 3
+Assert-Equal 'sample: the fleet example is a fleet' $sample.Arrays['fleet01'].Type 'Fleet'
 Assert-Equal 'sample: arrays file found beside the job file' $sample.ArraysFile (Join-Path $sampleDir 'arrays.jsonc')
 Assert-Equal 'sample: token path relative to the arrays file' $sample.Arrays['fa01'].ApiTokenFile (Join-Path $sampleDir 'secrets/fa01.token')
 Assert-Throws 'sample without a job ID needs Shares' { Get-EvpConfig -Path (Write-TestFile -Path (Join-Path $sampleDir 'unbound.jsonc') -Content (Get-Content (Join-Path $projectRoot 'config.sample.jsonc') -Raw)) } 'or set Veeam.JobId'
