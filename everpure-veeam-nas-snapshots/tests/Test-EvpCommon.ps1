@@ -136,6 +136,30 @@ $legacy = Write-TestFile -Path (Join-Path $tmp 'legacy-jobs/old.jsonc') -Content
 $null = Write-TestFile -Path (Join-Path $tmp 'legacy-jobs/arrays.jsonc') -Content $arraysSample
 Assert-Equal '1.0.0 job file beside a fresh arrays file: only its own arrays' ((Get-EvpConfig -Path $legacy).Arrays.Keys -join ',') 'fa'
 
+Write-TestSection 'Adding an array to an arrays file'
+$addDir = Join-Path $tmp 'add-array'
+function Test-AddArray([string] $Name, [string] $Start, [string[]] $Expected) {
+	$p = Write-TestFile -Path (Join-Path $addDir "$([guid]::NewGuid().ToString('N')).jsonc") -Content $Start
+	Add-EvpArraysFileEntry -Path $p -Name 'new01' -Endpoint 'new01.example.com'
+	$a = Read-EvpArraysFile -Path $p
+	Assert-Equal "$Name`: arrays afterwards" ($a.Keys -join ',') ($Expected -join ',')
+	return (Get-Content $p -Raw)
+}
+$after = Test-AddArray 'sample with commented examples' $arraysSample @('new01')
+Assert-True  'sample: comments kept' ($after -match '// \{ "Name": "fa01"' -and $after -match 'NEVER put a token')
+Assert-True  'sample: token file beside the arrays file' ($after -match '"ApiTokenFile": "secrets/new01.token"')
+$null = Test-AddArray 'one entry, bracket on its own line' "{`n`t`"Arrays`": [`n`t`t{ `"Name`": `"fa`", `"Endpoint`": `"e`", `"ApiTokenFile`": `"t`" } // first`n`t]`n}" @('fa', 'new01')
+$null = Test-AddArray 'empty list on one line' '{ "Arrays": [] }' @('new01')
+$null = Test-AddArray 'entry and bracket on one line' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ] }' @('fa', 'new01')
+$null = Test-AddArray 'other lists and strings with brackets before it' '{ "Note": "a ] in [ text", "Other": [1, 2], /* "Arrays": [ */ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ] }' @('fa', 'new01')
+$noList = Write-TestFile -Path (Join-Path $addDir 'nolist.jsonc') -Content '{ }'
+Assert-Throws 'a file without Arrays is refused' { Add-EvpArraysFileEntry -Path $noList -Name 'x' -Endpoint 'e' } 'no top-level Arrays list'
+Assert-Equal 'refused file unchanged' (Get-Content $noList -Raw) '{ }'
+$sameName = Write-TestFile -Path (Join-Path $addDir 'same.jsonc') -Content '{ "Arrays": [ { "Name": "new01", "Endpoint": "e", "ApiTokenFile": "t" } ] }'
+Assert-Throws 'a duplicate name is refused and rolled back' { Add-EvpArraysFileEntry -Path $sameName -Name 'new01' -Endpoint 'e2' } 'left unchanged'
+Assert-Equal 'rolled-back file unchanged' (Get-Content $sameName -Raw) '{ "Arrays": [ { "Name": "new01", "Endpoint": "e", "ApiTokenFile": "t" } ] }'
+Assert-Throws 'a name unfit for a file name is refused' { Add-EvpArraysFileEntry -Path $sameName -Name '../x' -Endpoint 'e' } 'ValidatePattern|does not match'
+
 Write-TestSection 'Get-EvpConfig: arrays file'
 $afDir = Join-Path $tmp 'arrays-file'
 $null = Write-TestFile -Path (Join-Path $afDir 'shared/arrays.jsonc') -Content '{ "Arrays": [ { "Name": "fa", "Endpoint": "fa.example.com", "ApiTokenFile": "secrets/fa.token" } ] }'

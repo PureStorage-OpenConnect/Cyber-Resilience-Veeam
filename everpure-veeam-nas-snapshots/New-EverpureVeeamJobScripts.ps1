@@ -132,12 +132,14 @@ Write-Host "Snapshot tag: $(Get-EvpDefaultSnapshotTag -ProfileName $Job -JobId $
 Write-Host ''
 Write-Host 'Next steps:'
 if ($arraysCreated) {
-	Write-Host "  1. List every FlashArray and FlashBlade once in $arraysPath (it starts empty, with examples)."
-	Write-Host '     Which array serves which share is worked out from the arrays'' file interfaces.'
+	Write-Host "  1. Add every FlashArray and FlashBlade once, with its token (elevated PowerShell):"
 } else {
-	Write-Host "  1. Check that $arraysPath lists the arrays this job's shares live on."
+	Write-Host "  1. Make sure $arraysPath lists the arrays this job's shares live on. To add one (elevated PowerShell):"
 }
-Write-Host "  2. Store each array's token once: .\Protect-EverpureVeeamSecret.ps1 -Path <token file from arrays.jsonc> -Endpoint <array> -Verify"
+Write-Host '       .\Protect-EverpureVeeamSecret.ps1 -Array <name> -Endpoint <management address>'
+Write-Host "     It adds the array to $arraysPath, prompts for the API token, stores it and tests it."
+Write-Host '     Which array serves which share is worked out from the arrays'' file interfaces.'
+Write-Host '  2. Optional: pin each array''s certificate (the helper prints its hash) in its "Tls" in arrays.jsonc.'
 Write-Host "  3. Verify: pwsh -NoProfile -File '$mainScript' -Phase verify -ConfigFile '$configPath'"
 Write-Host '     It lists the shares of the job and the array and source each one maps to.'
 if ($platform.IsLinux) {

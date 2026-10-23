@@ -311,6 +311,93 @@ function Get-EvpConfig {
 	}
 }
 
+function Read-EvpArraysFile {
+	<#
+	.SYNOPSIS
+		Loads an arrays file on its own, validated like the arrays of a job configuration.
+	.DESCRIPTION
+		For Protect-EverpureVeeamSecret.ps1, which stores each array's token at the path and
+		verifies it against the endpoint the arrays file already names.
+	.OUTPUTS
+		Ordered hashtable, array name -> array entry (Name, Endpoint, ApiTokenFile resolved, Platform, Tls).
+	#>
+	[CmdletBinding()]
+	[OutputType([System.Collections.Specialized.OrderedDictionary])]
+	param([Parameter(Mandatory)] [string] $Path)
+	$fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+	if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { throw "Arrays file '$fullPath' was not found. New-EverpureVeeamJobScripts.ps1 creates it in the jobs folder." }
+	$arrays = [ordered]@{}
+	$problems = [System.Collections.Generic.List[string]]::new()
+	Add-EvpArrayConfig -Target $arrays -RawArrays (Get-EvpProperty (Read-EvpJsonFile -Path $fullPath) 'Arrays') -BaseDirectory (Split-Path -Parent $fullPath) -Origin $fullPath -Problems $problems
+	if ($problems.Count -gt 0) { throw ("Arrays file '$fullPath' is invalid:`n  - " + ($problems -join "`n  - ")) }
+	return $arrays
+}
+
+function Add-EvpArraysFileEntry {
+	<#
+	.SYNOPSIS
+		Appends one array to the Arrays list of an arrays file, keeping its comments and layout.
+	.DESCRIPTION
+		A JSON round trip would drop every comment, so the entry is inserted as text before the
+		closing bracket of "Arrays", with a comma after the previous entry when there is one. The
+		scan skips strings and comments, so commented-out examples do not count as entries. The
+		result is read back and validated; on any problem the file is restored.
+		The token file is secrets/<Name>.token, relative to the arrays file.
+	#>
+	[CmdletBinding(SupportsShouldProcess)]
+	param(
+		[Parameter(Mandatory)] [string] $Path,
+		[Parameter(Mandatory)] [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')] [string] $Name,
+		[Parameter(Mandatory)] [string] $Endpoint,
+		[string] $Tls = 'skip'
+	)
+	$fullPath = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($Path)
+	$text = [System.IO.File]::ReadAllText($fullPath)
+
+	# Find '[' after the top-level "Arrays" key and its matching ']', outside strings and comments.
+	$i = 0; $depth = 0; $lastKey = $null; $listStart = -1; $listEnd = -1; $lastSignificant = -1
+	while ($i -lt $text.Length) {
+		$c = $text[$i]
+		if ($c -eq '/' -and $i + 1 -lt $text.Length -and $text[$i + 1] -eq '/') { $i = $text.IndexOf("`n", $i); if ($i -lt 0) { break }; continue }
+		if ($c -eq '/' -and $i + 1 -lt $text.Length -and $text[$i + 1] -eq '*') { $i = $text.IndexOf('*/', $i + 2); if ($i -lt 0) { break }; $i += 2; continue }
+		if ($c -eq '"') {
+			$j = $i + 1
+			while ($j -lt $text.Length -and $text[$j] -ne '"') { if ($text[$j] -eq '\') { $j++ }; $j++ }
+			$lastKey = $text.Substring($i + 1, $j - $i - 1)
+			$lastSignificant = $j; $i = $j + 1; continue
+		}
+		if ([char]::IsWhiteSpace($c)) { $i++; continue }
+		if ($c -in '{', '[') {
+			$depth++
+			if ($c -eq '[' -and $depth -eq 2 -and $lastKey -eq 'Arrays' -and $listStart -lt 0) { $listStart = $i }
+		} elseif ($c -in '}', ']') {
+			if ($c -eq ']' -and $listStart -ge 0 -and $listEnd -lt 0 -and $depth -eq 2) { $listEnd = $i; break }
+			$depth--
+		}
+		if ($c -ne ':') { $lastKey = if ($c -eq ',') { $null } else { $lastKey } }
+		$lastSignificant = $i
+		$i++
+	}
+	if ($listStart -lt 0 -or $listEnd -lt 0) { throw "'$fullPath' has no top-level Arrays list. Add `"Arrays`": [] to it first." }
+
+	$entry = '{{ "Name": {0}, "Endpoint": {1}, "ApiTokenFile": {2}, "Platform": "auto", "Tls": {3} }}' -f ($Name | ConvertTo-Json), ($Endpoint | ConvertTo-Json), ("secrets/$Name.token" | ConvertTo-Json), ($Tls | ConvertTo-Json)
+	$lineStart = $text.LastIndexOf("`n", $listEnd) + 1
+	$closingOnOwnLine = [string]::IsNullOrWhiteSpace($text.Substring($lineStart, $listEnd - $lineStart))
+	$newText = if ($closingOnOwnLine) { $text.Insert($lineStart, "`t`t$entry`n") } else { $text.Insert($listEnd, "`n`t`t$entry`n`t") }
+	# A previous entry ends with '}' as the last significant character before ']'.
+	if ($lastSignificant -gt $listStart -and $text[$lastSignificant] -eq '}') { $newText = $newText.Insert($lastSignificant + 1, ',') }
+
+	if (-not $PSCmdlet.ShouldProcess($fullPath, "Add array '$Name' ($Endpoint)")) { return }
+	[System.IO.File]::WriteAllText($fullPath, $newText, [System.Text.UTF8Encoding]::new($false))
+	try {
+		$arrays = Read-EvpArraysFile -Path $fullPath
+		if (-not $arrays.Contains($Name)) { throw "the new entry was not found after writing" }
+	} catch {
+		[System.IO.File]::WriteAllText($fullPath, $text, [System.Text.UTF8Encoding]::new($false))
+		throw "Could not add array '$Name' to '$fullPath' ($($_.Exception.Message)); the file was left unchanged. Add the entry by hand."
+	}
+}
+
 function Add-EvpArrayConfig {
 	<#
 	.SYNOPSIS

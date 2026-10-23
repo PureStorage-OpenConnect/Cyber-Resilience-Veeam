@@ -62,7 +62,7 @@ function Get-EvpVersion {
 
 Export-ModuleMember -Function @(
 	# Common
-	'Get-EvpPlatform', 'Initialize-EvpEnvironment', 'Get-EvpConfig', 'New-EvpShareRecord', 'ConvertTo-EvpMilliseconds',
+	'Get-EvpPlatform', 'Initialize-EvpEnvironment', 'Get-EvpConfig', 'Read-EvpArraysFile', 'Add-EvpArraysFileEntry','New-EvpShareRecord', 'ConvertTo-EvpMilliseconds',
 	'Get-EvpShareProtocol', 'Split-EvpSharePath', 'Get-EvpNormalizedSharePath', 'Get-EvpStorageSnapshotPath',
 	'Get-EvpTimestamp', 'Get-EvpDefaultSnapshotTag', 'New-EvpSnapshotName', 'Get-EvpSnapshotMatchPattern', 'Get-EvpSnapshotTimestamp', 'Get-EvpSentinelDirectoryName',
 	# Secrets

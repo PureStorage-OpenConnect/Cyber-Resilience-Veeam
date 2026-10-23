@@ -377,7 +377,7 @@ function Invoke-EvpVerifyPhase {
 		if ($plan.Unreachable.Contains($name)) { Write-Host "WARN $($name): $($plan.Unreachable[$name])"; continue }
 		Write-Host "OK   $($name): $($plan.Sessions[$name].Platform) '$($plan.Sessions[$name].ArrayName)', Purity $($plan.Sessions[$name].PurityVersion)"
 		if ($Config.Arrays[$name].Tls -eq 'skip') {
-			Write-Warning "$($name): Tls 'skip' accepts any certificate, so the API token can be intercepted on the network. Pin the certificate with Tls 'thumbprint:<SHA-256>'; Protect-EverpureVeeamSecret.ps1 -VerifyOnly prints it."
+			Write-Warning "$($name): Tls 'skip' accepts any certificate, so the API token can be intercepted on the network. Pin the certificate with Tls 'thumbprint:<SHA-256>' in arrays.jsonc; Protect-EverpureVeeamSecret.ps1 -Array $name -VerifyOnly prints it."
 		}
 	}
 	foreach ($u in $plan.Unmapped) { Write-Host "FAIL $($u.Share.VeeamPath): $($u.Reason)"; Add-Problem 'Array' "$($u.Share.VeeamPath): $($u.Reason)" }

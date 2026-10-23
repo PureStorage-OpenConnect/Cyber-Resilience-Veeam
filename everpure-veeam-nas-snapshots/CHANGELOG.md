@@ -27,6 +27,10 @@ declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start 
   the sweep and the post phase until none is left.
 - **File-to-tape jobs.** The job guard, the share discovery and the generator's job lookup work
   for file-to-tape jobs as well as file backup jobs.
+- `Protect-EverpureVeeamSecret.ps1 -Array <name> -Endpoint <address>` adds the array to
+  `arrays.jsonc` (keeping the file's comments), then stores and verifies its token. `-Array
+  <name>` alone (or `-Array *`) takes the token file, endpoint and TLS policy from
+  `arrays.jsonc`, so nothing is typed twice. `-Path` and `-Endpoint` still work.
 
 ### Changed
 

@@ -603,6 +603,50 @@ $r = Invoke-Entry -Phase verify -Config (Join-Path $tmp 'does-not-exist.jsonc')
 Assert-Equal 'bad config exit 1' $r.ExitCode 1
 Assert-True 'bad config message' ($r.Output -match 'was not found')
 
+Write-TestSection 'Secrets helper: -Array takes path and endpoint from arrays.jsonc'
+$helper = Join-Path $projectRoot 'Protect-EverpureVeeamSecret.ps1'
+$helperDir = Join-Path $tmp 'helper/jobs'
+$null = Write-TestFile -Path (Join-Path $helperDir 'arrays.jsonc') -Content '{ "Arrays": [ { "Name": "fa", "Endpoint": "fa", "ApiTokenFile": "secrets/fa.token" }, { "Name": "fb", "Endpoint": "fb", "ApiTokenFile": "secrets/fb.token" } ] }'
+function Invoke-Helper([string] $Arguments) {
+	$prelude = @"
+`$ErrorActionPreference = 'Stop'
+. '$stubsPath'
+Import-Module '$modulePath' -Force
+`$state = New-LabState
+Set-EvpHttpInvoker (New-EvpMockResponder -Routes (New-LabRoutes -State `$state) -CallLog '$httpLog')
+& '$helper' -ArraysFile '$(Join-Path $helperDir 'arrays.jsonc')' $Arguments
+"@
+	$preludePath = Write-TestFile -Path (Join-Path $tmp 'prelude-helper.ps1') -Content $prelude
+	$out = & (Get-PowerShellHostPath) -NoProfile -File $preludePath 2>&1
+	return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n") }
+}
+$r = Invoke-Helper "-Array fa -Secret (ConvertTo-SecureString 'fa-token' -AsPlainText -Force) -Force"
+Assert-Equal 'helper -Array: exit 0' $r.ExitCode 0
+Assert-True  'helper -Array: token at the path from arrays.jsonc' (Test-Path (Join-Path $helperDir 'secrets/fa.token'))
+Assert-True  'helper -Array: verified against the endpoint from arrays.jsonc' ($r.Output -match "Verification succeeded: FlashArray 'fa01'")
+$r = Invoke-Helper "-Array fb -Secret (ConvertTo-SecureString 'wrong' -AsPlainText -Force) -NoVerify -Force"
+Assert-Equal 'helper -NoVerify: exit 0 without a login' $r.ExitCode 0
+$r = Invoke-Helper '-Array * -VerifyOnly'
+Assert-True  'helper -Array * -VerifyOnly: the good token passes' ($r.Output -match "Verification succeeded: FlashArray 'fa01'")
+Assert-True  'helper -Array * -VerifyOnly: the bad one is reported, the run fails' ($r.ExitCode -ne 0 -and $r.Output -match '1 of 2 array\(s\) failed: fb')
+$r = Invoke-Helper '-Array nope -VerifyOnly'
+Assert-True  'helper: unknown array names the defined ones' ($r.ExitCode -ne 0 -and $r.Output -match 'nope\. Arrays defined there: fa, fb')
+# -Endpoint adds the array, creating the arrays file from the sample when there is none.
+Remove-Item -LiteralPath (Join-Path $helperDir 'arrays.jsonc'), (Join-Path $helperDir 'secrets') -Recurse -Force
+$r = Invoke-Helper "-Array fa -Endpoint fa -Secret (ConvertTo-SecureString 'fa-token' -AsPlainText -Force)"
+Assert-Equal 'helper -Endpoint: exit 0' $r.ExitCode 0
+Assert-True  'helper -Endpoint: arrays file created and the array added' ($r.Output -match 'Created .*arrays\.jsonc' -and $r.Output -match "Added array 'fa'")
+Assert-Equal 'helper -Endpoint: entry in the file' ((Read-EvpArraysFile -Path (Join-Path $helperDir 'arrays.jsonc'))['fa'].Endpoint) 'fa'
+Assert-True  'helper -Endpoint: token stored at secrets/fa.token' (Test-Path (Join-Path $helperDir 'secrets/fa.token'))
+Assert-True  'helper -Endpoint: and verified' ($r.Output -match "Verification succeeded: FlashArray 'fa01'")
+$r = Invoke-Helper "-Array fb -Endpoint fb -Tls system -Secret (ConvertTo-SecureString 'fb-token' -AsPlainText -Force) -NoVerify"
+Assert-Equal 'helper -Endpoint: second array appended' (((Read-EvpArraysFile -Path (Join-Path $helperDir 'arrays.jsonc')).Keys) -join ',') 'fa,fb'
+Assert-Equal 'helper -Endpoint: Tls written into the entry' ((Read-EvpArraysFile -Path (Join-Path $helperDir 'arrays.jsonc'))['fb'].Tls) 'system'
+$r = Invoke-Helper "-Array fa -Endpoint other -Secret (ConvertTo-SecureString 'x' -AsPlainText -Force) -Force"
+Assert-True  'helper -Endpoint: another endpoint for a known array is refused' ($r.ExitCode -ne 0 -and $r.Output -match "with endpoint 'fa'\. Edit the entry there")
+$r = Invoke-Helper "-Array fa, fb -Endpoint fa"
+Assert-True  'helper -Endpoint: only one array at a time' ($r.ExitCode -ne 0 -and $r.Output -match 'adds one array')
+
 Write-TestSection 'WhatIf forwarding is explicit in the orchestration source'
 $orchestrate = Get-Content (Join-Path $projectRoot 'lib/Orchestrate.ps1') -Raw
 Assert-True 'New-EvpArraySnapshot forwards WhatIf' ($orchestrate -match 'New-EvpArraySnapshot[^\n]*-WhatIf:\$WhatIfPreference')

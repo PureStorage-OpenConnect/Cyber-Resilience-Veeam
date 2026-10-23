@@ -140,13 +140,15 @@ are detected automatically.
    `C:\01_SCRIPTS\everpure-veeam-nas`.
 2. Create the job files with `.\New-EverpureVeeamJobScripts.ps1 -Job <job>`. On the backup
    server it looks the file backup or file-to-tape job up and writes its ID to `Veeam.JobId`;
-   elsewhere pass `-JobId`. The job configuration needs no editing. The first time, also list
-   every FlashArray and FlashBlade in `jobs\arrays.jsonc` (name, management endpoint, token
-   file). That file serves every job in the folder, and nothing in it names a share.
-3. Store each array's API token once and verify it from an **elevated** PowerShell (Run as
-   administrator) with
-   `.\Protect-EverpureVeeamSecret.ps1 -Path .\jobs\secrets\<array>.token -Endpoint <array> -Verify`.
-   The helper creates the file with an ACL for SYSTEM and Administrators only. In a non-elevated
+   elsewhere pass `-JobId`. The job configuration needs no editing.
+3. Add each FlashArray and FlashBlade once, with its API token, from an **elevated** PowerShell
+   (Run as administrator):
+   `.\Protect-EverpureVeeamSecret.ps1 -Array <name> -Endpoint <management address>`. It adds the
+   array to `jobs\arrays.jsonc` (token file `jobs\secrets\<name>.token`), prompts for the token,
+   stores it and logs in to the array to prove it works (`-NoVerify` skips that). That file
+   serves every job in the folder, and nothing in it names a share; editing it by hand works
+   too. Later, `-Array <name>` alone replaces a token, and `-Array * -VerifyOnly` tests them
+   all. The helper creates the token file with an ACL for SYSTEM and Administrators only. In a non-elevated
    session UAC filters your Administrators membership, so you could write the file but not read
    it back; the helper therefore refuses such a session before it asks for the secret and writes
    nothing. The token needs the `storage_admin` role (create and destroy snapshots, read
@@ -221,9 +223,9 @@ for the job log, the sentinel path is what protects the backup.
 * **TLS.** `skip` accepts any certificate (the default, both products ship self-signed ones),
   `system` uses the trust store, `thumbprint:<SHA-1 or SHA-256>` pins one certificate. With
   `skip` anyone on the management network who can intercept the connection gets the array API
-  token, which can destroy snapshots. Pin it: `Protect-EverpureVeeamSecret.ps1 -Verify` (or
-  `-VerifyOnly`) prints the array's SHA-256 certificate hash, and the verify phase warns for every
-  endpoint still on `skip`.
+  token, which can destroy snapshots. Pin it: `Protect-EverpureVeeamSecret.ps1 -Array <name>` (or
+  with `-VerifyOnly`) prints the array's SHA-256 certificate hash to put into that array's `Tls`
+  in `arrays.jsonc`, and the verify phase warns for every endpoint still on `skip`.
 
 ## Versioning
 
