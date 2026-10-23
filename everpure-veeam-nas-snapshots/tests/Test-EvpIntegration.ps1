@@ -614,7 +614,9 @@ function Invoke-Helper([string] $Arguments) {
 Import-Module '$modulePath' -Force
 `$state = New-LabState
 Set-EvpHttpInvoker (New-EvpMockResponder -Routes (New-LabRoutes -State `$state) -CallLog '$httpLog')
-& '$helper' -ArraysFile '$(Join-Path $helperDir 'arrays.jsonc')' $Arguments
+# The bare message: the error view wraps at the console width, which differs between hosts.
+try { & '$helper' -ArraysFile '$(Join-Path $helperDir 'arrays.jsonc')' $Arguments; exit 0 }
+catch { Write-Host "ERROR: `$(`$_.Exception.Message)"; exit 1 }
 "@
 	$preludePath = Write-TestFile -Path (Join-Path $tmp 'prelude-helper.ps1') -Content $prelude
 	$out = & (Get-PowerShellHostPath) -NoProfile -File $preludePath 2>&1
@@ -646,6 +648,44 @@ $r = Invoke-Helper "-Array fa -Endpoint other -Secret (ConvertTo-SecureString 'x
 Assert-True  'helper -Endpoint: another endpoint for a known array is refused' ($r.ExitCode -ne 0 -and $r.Output -match "with endpoint 'fa'\. Edit the entry there")
 $r = Invoke-Helper "-Array fa, fb -Endpoint fa"
 Assert-True  'helper -Endpoint: only one array at a time' ($r.ExitCode -ne 0 -and $r.Output -match 'adds one array')
+
+Write-TestSection 'Generator: nothing is written without a valid job'
+$generator = Join-Path $projectRoot 'New-EverpureVeeamJobScripts.ps1'
+$genJobId = 'efefefef-bbbb-4bbb-8bbb-00000000000b'
+$env:EVP_TEST_JOBS = ConvertTo-Json -Compress -Depth 4 -InputObject @(
+	@{ Id = $genJobId; Name = 'gen-job'; ShareRoots = @('\\192.0.2.10\finance-smb') },
+	@{ Id = 'efefefef-cccc-4ccc-8ccc-00000000000c'; Name = 'twice'; ShareRoots = @() },
+	@{ Id = 'efefefef-dddd-4ddd-8ddd-00000000000d'; Name = 'twice'; Kind = 'FileToTape'; ShareRoots = @() })
+function Invoke-Generator([string] $Directory, [string] $Arguments) {
+	$prelude = @"
+`$ErrorActionPreference = 'Stop'
+try { & '$generator' -JobsDirectory '$Directory' $Arguments; exit 0 }
+catch { Write-Host "ERROR: `$(`$_.Exception.Message)"; exit 1 }
+"@
+	$preludePath = Write-TestFile -Path (Join-Path $tmp 'prelude-generator.ps1') -Content $prelude
+	$out = & (Get-PowerShellHostPath) -NoProfile -File $preludePath 2>&1
+	return [pscustomobject]@{ ExitCode = $LASTEXITCODE; Output = ($out -join "`n") }
+}
+$genDir = Join-Path $tmp 'gen/jobs'
+$r = Invoke-Generator $genDir '-Job no-such-job'
+Assert-True  'unknown job name: error' ($r.ExitCode -ne 0 -and $r.Output -match "No file backup or file-to-tape job named 'no-such-job'")
+Assert-True  'unknown job name: nothing written, not even the folder' (-not (Test-Path $genDir))
+$r = Invoke-Generator $genDir '-Job twice'
+Assert-True  'two jobs with the name: error naming both' ($r.ExitCode -ne 0 -and $r.Output -match '2 jobs are named .twice.' -and $r.Output -match 'FileToTape')
+$r = Invoke-Generator $genDir '-Job gen-job -JobId 00000000-0000-0000-0000-000000000000'
+Assert-True  'unknown -JobId: error' ($r.ExitCode -ne 0 -and $r.Output -match 'Check -JobId' -and -not (Test-Path $genDir))
+$r = Invoke-Generator $genDir '-Job gen-job'
+Assert-Equal 'job found by name: exit 0' $r.ExitCode 0
+Assert-True  'job found by name: its ID in the configuration' (Select-String -Path (Join-Path $genDir 'gen-job.jsonc') -Pattern "`"JobId`": `"$genJobId`"" -Quiet)
+Assert-Throws 'a fresh job without arrays says how to add one' { Get-EvpConfig -Path (Join-Path $genDir 'gen-job.jsonc') } 'Protect-EverpureVeeamSecret\.ps1 -Array <name> -Endpoint'
+Assert-True  'job found by name: wrappers and arrays file' ((Test-Path (Join-Path $genDir 'gen-job-pre.ps1')) -and (Test-Path (Join-Path $genDir 'arrays.jsonc')))
+$r = Invoke-Generator $genDir "-Job renamed -JobId $($genJobId.ToUpperInvariant())"
+Assert-True  'known -JobId: accepted, the job name shown' ($r.ExitCode -eq 0 -and $r.Output -match "job 'gen-job' found for ID $genJobId")
+$r = Invoke-Generator $genDir '-Job unbound -NoJobId'
+Assert-True  '-NoJobId: written with a warning' ($r.ExitCode -eq 0 -and $r.Output -match 'No job binding' -and (Select-String -Path (Join-Path $genDir 'unbound.jsonc') -Pattern '"JobId": ""' -Quiet))
+$r = Invoke-Generator $genDir "-Job x -NoJobId -JobId $genJobId"
+Assert-True  '-NoJobId with -JobId: refused' ($r.ExitCode -ne 0 -and $r.Output -match 'either -JobId or -NoJobId')
+$env:EVP_TEST_JOBS = $null
 
 Write-TestSection 'WhatIf forwarding is explicit in the orchestration source'
 $orchestrate = Get-Content (Join-Path $projectRoot 'lib/Orchestrate.ps1') -Raw

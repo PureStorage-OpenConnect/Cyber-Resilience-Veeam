@@ -39,6 +39,9 @@ declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start 
   entry for a share that is not in the job is ignored with a warning instead of being repointed.
   Configurations without `Veeam.JobId`, and the REST backend, work as before.
 - `-NoJobGuard` keeps reading the job for its shares; it only skips the session check.
+- `New-EverpureVeeamJobScripts.ps1` stops and writes nothing when the job name matches no job or
+  several, and checks a given `-JobId` against the server when the Veeam module is available.
+  `-NoJobId` writes a configuration without a job binding on purpose.
 - The post phase continues on the arrays it can reach when one is unreachable (exit code 4), and
   leaves that array's sources for the next run.
 - The pre phase reports every share missing from the Veeam inventory at once, and the fail-safe

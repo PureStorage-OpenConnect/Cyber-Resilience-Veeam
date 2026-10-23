@@ -36,9 +36,14 @@
 
 .PARAMETER JobId
 	ID of the Veeam job, written to Veeam.JobId in the configuration: the job the shares are read
-	from, and the job guard (see the README). When omitted and the Veeam PowerShell module is
-	available, the file backup or file-to-tape job is looked up by name on the local backup
-	server.
+	from, and the job guard (see the README). When omitted, the file backup or file-to-tape job
+	is looked up by name on the local backup server, and nothing is written unless exactly one
+	job matches. When given on a host with the Veeam PowerShell module, it must name an existing
+	job; elsewhere (a workstation, the appliance) it is taken as is and the verify phase checks it.
+
+.PARAMETER NoJobId
+	Write a configuration without a job binding, as in 1.0.0: no job guard, and every share of
+	the job must then be listed in Shares by hand. For special cases only.
 
 .PARAMETER JobsDirectory
 	Where the files go. Defaults to a 'jobs' folder beside this script.
@@ -59,6 +64,7 @@ param(
 	[Parameter(Mandatory)] [ValidatePattern('^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$')] [string] $Job,
 	[ValidatePattern('^$|^[0-9a-fA-F]{8}-([0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}$')] [string] $JobId,
 	[string] $JobsDirectory,
+	[switch] $NoJobId,
 	[switch] $Force
 )
 
@@ -68,27 +74,44 @@ $platform = Get-EvpPlatform
 
 if (-not $JobsDirectory) { $JobsDirectory = Join-Path $PSScriptRoot 'jobs' }
 $JobsDirectory = $ExecutionContext.SessionState.Path.GetUnresolvedProviderPathFromPSPath($JobsDirectory)
-if (-not (Test-Path -LiteralPath $JobsDirectory -PathType Container)) {
-	if ($PSCmdlet.ShouldProcess($JobsDirectory, 'Create directory')) { New-Item -ItemType Directory -Path $JobsDirectory -Force | Out-Null }
-}
 
 $mainScript = Join-Path $PSScriptRoot 'Invoke-EverpureVeeamNasSnapshot.ps1'
 $configPath = Join-Path $JobsDirectory "$Job.jsonc"
 $arraysPath = Join-Path $JobsDirectory 'arrays.jsonc'
 $written = [System.Collections.Generic.List[string]]::new()
 
-# Job ID: given, or looked up by name where the Veeam module is at hand.
-if (-not $JobId -and (Test-EvpVeeamModule)) {
-	try {
-		$found = @(Find-EvpVeeamJobByName -Name $Job)
-		if ($found.Count -eq 1) { $JobId = $found[0].Id; Write-Host "Veeam $($found[0].Kind) job '$Job' found, ID $JobId." }
-		elseif ($found.Count -eq 0) { Write-Warning "No file backup or file-to-tape job named '$Job' exists on this server. Pass -JobId, or fill in Veeam.JobId once the job exists." }
-		else { Write-Warning "$($found.Count) jobs match '$Job' ($(($found | ForEach-Object { "$($_.Kind) $($_.Id)" }) -join ', ')); pass -JobId." }
-	} catch { Write-Warning "Could not look up job '$Job': $($_.Exception.Message). Pass -JobId, or fill in Veeam.JobId later." }
+# Job ID: looked up by name, or given and checked where the Veeam module is at hand. Nothing is
+# written without one (unless -NoJobId): the configuration would not load, and a wrong ID would
+# only surface at the first job run.
+if ($NoJobId -and $JobId) { throw 'Use either -JobId or -NoJobId, not both.' }
+$haveModule = (-not $NoJobId) -and (Test-EvpVeeamModule)
+if ($NoJobId) {
+	Write-Warning 'No job binding (-NoJobId): no job guard, and every share of the job must be listed in Shares in the configuration before it loads.'
 } elseif (-not $JobId) {
-	Write-Warning 'The Veeam PowerShell module is not available here, so Veeam.JobId stays empty. Pass -JobId.'
+	if (-not $haveModule) { throw "The Veeam PowerShell module is not available here, so job '$Job' cannot be looked up. Pass -JobId <job ID>. Nothing was written." }
+	try { $found = @(Find-EvpVeeamJobByName -Name $Job) }
+	catch { throw "Could not look up job '$Job': $($_.Exception.Message). Pass -JobId <job ID>. Nothing was written." }
+	if ($found.Count -eq 0) {
+		throw "No file backup or file-to-tape job named '$Job' exists on this server. The name must match the job exactly, or pass -JobId <job ID> (Get-VBRUnstructuredBackupJob | Select-Object Name, Id). Nothing was written."
+	}
+	if ($found.Count -gt 1) {
+		throw "$($found.Count) jobs are named '$Job' ($(($found | ForEach-Object { "$($_.Kind) $($_.Id)" }) -join ', ')). Pass -JobId with the one you mean. Nothing was written."
+	}
+	$JobId = $found[0].Id
+	Write-Host "Veeam $($found[0].Kind) job '$Job' found, ID $JobId."
+} elseif ($haveModule) {
+	try { $bound = Get-EvpVeeamJob -Session ([pscustomobject]@{ Backend = 'PowerShell' }) -JobId $JobId }
+	catch { throw "$($_.Exception.Message) Check -JobId. Nothing was written." }
+	$JobId = $bound.Id
+	Write-Host "Veeam $($bound.Kind) job '$($bound.Name)' found for ID $JobId$(if ($bound.Name -ne $Job) { " (the files are still named after '$Job')" })."
+} else {
+	$JobId = $JobId.ToLowerInvariant()
+	Write-Warning "The Veeam PowerShell module is not available here, so job ID $JobId is not checked now. The verify phase checks it."
 }
-if (-not $JobId) { Write-Warning 'Without Veeam.JobId the configuration needs every share of the job listed in Shares, and has no job guard.' }
+
+if (-not (Test-Path -LiteralPath $JobsDirectory -PathType Container)) {
+	if ($PSCmdlet.ShouldProcess($JobsDirectory, 'Create directory')) { New-Item -ItemType Directory -Path $JobsDirectory -Force | Out-Null }
+}
 
 if ((Test-Path -LiteralPath $configPath) -and -not $Force) {
 	Write-Host "Keeping existing configuration '$configPath' (use -Force to overwrite)."

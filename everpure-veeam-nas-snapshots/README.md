@@ -139,8 +139,10 @@ are detected automatically.
 1. Install PowerShell 7 if needed. Copy this folder to the backup server, for example
    `C:\01_SCRIPTS\everpure-veeam-nas`.
 2. Create the job files with `.\New-EverpureVeeamJobScripts.ps1 -Job <job>`. On the backup
-   server it looks the file backup or file-to-tape job up and writes its ID to `Veeam.JobId`;
-   elsewhere pass `-JobId`. The job configuration needs no editing.
+   server it looks the file backup or file-to-tape job up and writes its ID to `Veeam.JobId`.
+   If no job or more than one has that name, it stops and writes nothing; pass `-JobId`, which
+   is checked against the server too (elsewhere, `-JobId` is taken as is and the verify phase
+   checks it). The job configuration needs no editing.
 3. Add each FlashArray and FlashBlade once, with its API token, from an **elevated** PowerShell
    (Run as administrator):
    `.\Protect-EverpureVeeamSecret.ps1 -Array <name> -Endpoint <management address>`. It adds the

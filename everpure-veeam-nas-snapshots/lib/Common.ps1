@@ -210,7 +210,7 @@ function Get-EvpConfig {
 		$arraysFile = $null
 	}
 	Add-EvpArrayConfig -Target $arrays -RawArrays (Get-EvpProperty $raw 'Arrays') -BaseDirectory $baseDir -Origin $fullPath -Problems $problems
-	if ($arrays.Count -eq 0) { $problems.Add("No arrays are defined. List them once in '$(Join-Path $baseDir 'arrays.jsonc')' (see arrays.sample.jsonc), or in Arrays in this file.") }
+	if ($arrays.Count -eq 0) { $problems.Add("No arrays are defined. Add each array once with .\Protect-EverpureVeeamSecret.ps1 -Array <name> -Endpoint <management address>, which writes it to '$(Join-Path $baseDir 'arrays.jsonc')' and stores its token, or list them in Arrays in this file.") }
 
 	# --- Shares ------------------------------------------------------------------------------
 	# With Veeam.JobId the shares come from the job at run time and these entries only override
