@@ -210,7 +210,8 @@ function Set-EvpVeeamSnapshotPathPowerShell {
 		[Parameter(Mandatory)] $Session,
 		[Parameter(Mandatory)] $Share,
 		[Parameter(Mandatory)] [string] $StorageSnapshotPath,
-		[bool] $EnsureProcessingMode = $true
+		[bool] $EnsureProcessingMode = $true,
+		[bool] $Failover = $false
 	)
 	$cmdletName = switch ($Share.TypeName) {
 		'VBRNASSMBServer' { 'Set-VBRNASSMBServer' }
@@ -221,10 +222,10 @@ function Set-EvpVeeamSnapshotPathPowerShell {
 	if (-not $command) { throw "The Veeam cmdlet '$cmdletName' is not available in this version of the Veeam PowerShell module." }
 
 	$setParams = @{ Server = $Share.Raw; StorageSnapshotPath = $StorageSnapshotPath; ErrorAction = 'Stop' }
-	if ($command.Parameters.ContainsKey('EnableDirectBackupFailover')) { $setParams['EnableDirectBackupFailover'] = $false }
+	if ($command.Parameters.ContainsKey('EnableDirectBackupFailover')) { $setParams['EnableDirectBackupFailover'] = $Failover }
 	if ($EnsureProcessingMode -and $command.Parameters.ContainsKey('ProcessingMode')) { $setParams['ProcessingMode'] = 'StorageSnapshot' }
 
-	Write-Host "Pointing $($Share.Protocol) share '$($Share.Path)' at '$StorageSnapshotPath' ($cmdletName, failover off$(if ($EnsureProcessingMode) { ', mode StorageSnapshot' }))..."
+	Write-Host "Pointing $($Share.Protocol) share '$($Share.Path)' at '$StorageSnapshotPath' ($cmdletName, failover $(if ($Failover) { 'ON' } else { 'off' })$(if ($EnsureProcessingMode) { ', mode StorageSnapshot' }))..."
 	if ($PSCmdlet.ShouldProcess($Share.Path, "$cmdletName -StorageSnapshotPath '$StorageSnapshotPath'")) {
 		& $cmdletName @setParams | Out-Null
 	}
@@ -329,15 +330,16 @@ function Set-EvpVeeamSnapshotPathRest {
 		[Parameter(Mandatory)] $Share,
 		[Parameter(Mandatory)] [string] $StorageSnapshotPath,
 		[bool] $EnsureProcessingMode = $true,
+		[bool] $Failover = $false,
 		[int] $TimeoutSec = 120
 	)
 	$model = Invoke-EvpVeeamRest -Session $Session -Path "/api/v1/inventory/unstructuredDataServers/$($Share.Id)"
 	$adv = $model.advancedSettings
 	$adv.storageSnapshotPath = $StorageSnapshotPath
-	$adv.directBackupFailoverEnabled = $false
+	$adv.directBackupFailoverEnabled = $Failover
 	if ($EnsureProcessingMode) { $adv.processingMode = 'StorageSnapshot' }
 
-	Write-Host "Pointing $($Share.Protocol) share '$($Share.Path)' at '$StorageSnapshotPath' (REST PUT, failover off$(if ($EnsureProcessingMode) { ', mode StorageSnapshot' }))..."
+	Write-Host "Pointing $($Share.Protocol) share '$($Share.Path)' at '$StorageSnapshotPath' (REST PUT, failover $(if ($Failover) { 'ON' } else { 'off' })$(if ($EnsureProcessingMode) { ', mode StorageSnapshot' }))..."
 	if (-not $PSCmdlet.ShouldProcess($Share.Path, "PUT unstructuredDataServers storageSnapshotPath '$StorageSnapshotPath'")) { return $StorageSnapshotPath }
 
 	$save = Invoke-EvpVeeamRest -Session $Session -Method PUT -Path "/api/v1/inventory/unstructuredDataServers/$($Share.Id)" -Body $model
@@ -392,7 +394,7 @@ function Find-EvpVeeamShare {
 function Set-EvpVeeamStorageSnapshotPath {
 	<#
 	.SYNOPSIS
-		Points a share at a storage snapshot path with failover off, through the session's backend.
+		Points a share at a storage snapshot path with failover off (or on, for a live fallback), through the session's backend.
 	#>
 	[CmdletBinding(SupportsShouldProcess)]
 	[OutputType([string])]
@@ -400,48 +402,133 @@ function Set-EvpVeeamStorageSnapshotPath {
 		[Parameter(Mandatory)] $Session,
 		[Parameter(Mandatory)] $Share,
 		[Parameter(Mandatory)] [string] $StorageSnapshotPath,
-		[bool] $EnsureProcessingMode = $true
+		[bool] $EnsureProcessingMode = $true,
+		[bool] $Failover = $false
 	)
 	# -WhatIf is forwarded explicitly: $WhatIfPreference does not reliably cross function
 	# boundaries on every PowerShell 7 release.
 	if ($Session.Backend -eq 'PowerShell') {
-		return (Set-EvpVeeamSnapshotPathPowerShell -Session $Session -Share $Share -StorageSnapshotPath $StorageSnapshotPath -EnsureProcessingMode $EnsureProcessingMode -WhatIf:$WhatIfPreference)
+		return (Set-EvpVeeamSnapshotPathPowerShell -Session $Session -Share $Share -StorageSnapshotPath $StorageSnapshotPath -EnsureProcessingMode $EnsureProcessingMode -Failover $Failover -WhatIf:$WhatIfPreference)
 	}
-	return (Set-EvpVeeamSnapshotPathRest -Session $Session -Share $Share -StorageSnapshotPath $StorageSnapshotPath -EnsureProcessingMode $EnsureProcessingMode -WhatIf:$WhatIfPreference)
+	return (Set-EvpVeeamSnapshotPathRest -Session $Session -Share $Share -StorageSnapshotPath $StorageSnapshotPath -EnsureProcessingMode $EnsureProcessingMode -Failover $Failover -WhatIf:$WhatIfPreference)
 }
 
 #endregion
 
 #region Job binding (Veeam.JobId)
 
+function Get-EvpVeeamObjectLabel {
+	<#
+	.SYNOPSIS
+		Names a job object that has no path, for the list of skipped objects.
+	#>
+	[CmdletBinding()]
+	[OutputType([string])]
+	param([Parameter(Mandatory)] $Object)
+	$kind = if ($Object.Server -and $Object.Server.Type) { [string]$Object.Server.Type } else { $Object.GetType().Name }
+	$name = if ($Object.Server -and $Object.Server.Name) { [string]$Object.Server.Name } elseif ($Object.Name) { [string]$Object.Name } else { $null }
+	if ($name) { return "$name ($kind)" }
+	return "$kind object without a path"
+}
+
 function Get-EvpVeeamJob {
 	<#
 	.SYNOPSIS
-		Looks up the Veeam job a configuration is bound to (Veeam.JobId).
+		Looks up the Veeam job a configuration is bound to (Veeam.JobId): a file backup job or a
+		file-to-tape job.
+	.DESCRIPTION
+		The two kinds differ in every cmdlet involved, so this function hides them behind one
+		record. File backup: Get-VBRUnstructuredBackupJob -Id, share behind
+		BackupObject[].Server.Path. File-to-tape: Get-VBRTapeJob has no -Id, so all tape jobs are
+		listed and filtered; the share is Object[].Server.Name (Object[].Path carries an
+		'nfs41://' prefix for NFS). A sub-folder or single-file object resolves to its share.
+		An object without a path, such as the bucket of an object-storage-to-tape job (Veeam
+		types that job FileToTape too), is listed in Skipped by its server type.
 	.OUTPUTS
-		Record with Id, Name, Type and ShareRoots: the share paths behind the job's objects
-		(a sub-folder or single-file object resolves to its share), or $null when the backend
-		cannot list them.
+		Record with Id, Name, Type, Kind ('FileBackup' or 'FileToTape'), Shares (Path, Protocol,
+		InventoryId per share, deduplicated), ShareRoots (their paths), Skipped (objects that
+		are not SMB or NFS shares) and Raw (the job object). Shares and ShareRoots are $null
+		when the backend cannot list the job objects (REST).
 	#>
 	[CmdletBinding()]
 	[OutputType([psobject])]
 	param([Parameter(Mandatory)] $Session, [Parameter(Mandatory)] [string] $JobId)
 
+	$JobId = $JobId.ToLowerInvariant()
 	if ($Session.Backend -eq 'PowerShell') {
 		$job = $null
-		try { $job = Get-VBRUnstructuredBackupJob -Id $JobId -ErrorAction Stop } catch { $job = $null }
-		if (-not $job) { throw "No file backup job with ID '$JobId' exists on this backup server. Veeam.JobId is stale (job deleted and re-created?) or belongs to another server." }
-		$roots = @($job.BackupObject | ForEach-Object {
-				if ($_.Server -and $_.Server.Path) { [string]$_.Server.Path } elseif ($_.Path) { [string]$_.Path }
-			} | Where-Object { $_ } | Sort-Object -Unique)
-		return [pscustomobject]@{ Id = ([string]$job.Id).ToLowerInvariant(); Name = [string]$job.Name; Type = $job.GetType().Name; ShareRoots = $roots }
+		$kind = 'FileBackup'
+		try { $job = Get-VBRUnstructuredBackupJob -Id $JobId -ErrorAction Stop -WarningAction SilentlyContinue } catch { $job = $null }
+		if (-not $job -and (Get-Command -Name 'Get-VBRTapeJob' -ErrorAction SilentlyContinue)) {
+			$job = @(Get-VBRTapeJob -ErrorAction Stop -WarningAction SilentlyContinue | Where-Object { ([string]$_.Id).ToLowerInvariant() -eq $JobId }) | Select-Object -First 1
+			if ($job -and [string]$job.Type -ne 'FileToTape') {
+				throw "Job '$($job.Name)' ($JobId) is a $($job.Type) tape job. Only file backup and file-to-tape jobs read shares, so only those can be backed up from storage snapshots."
+			}
+			$kind = 'FileToTape'
+		}
+		if (-not $job) { throw "No file backup or file-to-tape job with ID '$JobId' exists on this backup server. Veeam.JobId is stale (job deleted and re-created?) or belongs to another server." }
+
+		$objects = if ($kind -eq 'FileBackup') {
+			@($job.BackupObject | ForEach-Object {
+					$path = if ($_.Server -and $_.Server.Path) { [string]$_.Server.Path } else { [string]$_.Path }
+					[pscustomobject]@{ Path = $path; InventoryId = if ($_.Server) { [string]$_.Server.Id } else { $null }; Label = (Get-EvpVeeamObjectLabel $_) }
+				})
+		} else {
+			@($job.Object | ForEach-Object {
+					$path = if ($_.Server -and $_.Server.Name) { [string]$_.Server.Name } else { [string]$_.Path -replace '^nfs\d*://', '' }
+					[pscustomobject]@{ Path = $path; InventoryId = if ($_.Server) { [string]$_.Server.Id } else { $null }; Label = (Get-EvpVeeamObjectLabel $_) }
+				})
+		}
+		$shares = [System.Collections.Generic.List[object]]::new()
+		$skipped = [System.Collections.Generic.List[string]]::new()
+		$seen = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
+		foreach ($o in $objects) {
+			if (-not $o.Path) { $skipped.Add($o.Label); continue }
+			$protocol = Get-EvpShareProtocol -VeeamPath $o.Path
+			if (-not $protocol) { $skipped.Add($o.Path); continue }
+			if (-not $seen.Add((Get-EvpNormalizedSharePath -VeeamPath $o.Path))) { continue }
+			$id = if ($o.InventoryId) { $o.InventoryId.ToLowerInvariant() } else { $null }
+			$shares.Add([pscustomobject]@{ Path = $o.Path; Protocol = $protocol; InventoryId = $id })
+		}
+		return [pscustomobject]@{
+			Id         = ([string]$job.Id).ToLowerInvariant()
+			Name       = [string]$job.Name
+			Type       = $job.GetType().Name
+			Kind       = $kind
+			Shares     = $shares.ToArray()
+			ShareRoots = @($shares | ForEach-Object { $_.Path })
+			Skipped    = $skipped.ToArray()
+			Raw        = $job
+		}
 	}
 	# REST: /api/v1/jobs/{id}. Whether a build lists file backup jobs there is not guaranteed.
 	try {
 		$job = Invoke-EvpVeeamRest -Session $Session -Path "/api/v1/jobs/$JobId"
 	} catch { throw "Job '$JobId' could not be read through the REST API: $($_.Exception.Message)" }
 	if (-not $job -or -not $job.id) { throw "No job with ID '$JobId' exists on this backup server. Veeam.JobId is stale or belongs to another server." }
-	return [pscustomobject]@{ Id = ([string]$job.id).ToLowerInvariant(); Name = [string]$job.name; Type = [string]$job.type; ShareRoots = $null }
+	return [pscustomobject]@{ Id = ([string]$job.id).ToLowerInvariant(); Name = [string]$job.name; Type = [string]$job.type; Kind = 'FileBackup'; Shares = $null; ShareRoots = $null; Skipped = @(); Raw = $job }
+}
+
+function Find-EvpVeeamJobByName {
+	<#
+	.SYNOPSIS
+		Finds file backup and file-to-tape jobs by name (PowerShell backend). For the generator.
+	.OUTPUTS
+		Zero or more records with Id, Name and Kind.
+	#>
+	[CmdletBinding()]
+	[OutputType([object[]])]
+	param([Parameter(Mandatory)] [string] $Name)
+	$found = [System.Collections.Generic.List[object]]::new()
+	foreach ($j in @(Get-VBRUnstructuredBackupJob -Name $Name -ErrorAction SilentlyContinue -WarningAction SilentlyContinue)) {
+		if ($j) { $found.Add([pscustomobject]@{ Id = ([string]$j.Id).ToLowerInvariant(); Name = [string]$j.Name; Kind = 'FileBackup' }) }
+	}
+	if (Get-Command -Name 'Get-VBRTapeJob' -ErrorAction SilentlyContinue) {
+		foreach ($j in @(Get-VBRTapeJob -Name $Name -ErrorAction SilentlyContinue -WarningAction SilentlyContinue | Where-Object { [string]$_.Type -eq 'FileToTape' })) {
+			$found.Add([pscustomobject]@{ Id = ([string]$j.Id).ToLowerInvariant(); Name = [string]$j.Name; Kind = 'FileToTape' })
+		}
+	}
+	return $found.ToArray()
 }
 
 function Get-EvpVeeamActiveJobSessions {
@@ -454,8 +541,16 @@ function Get-EvpVeeamActiveJobSessions {
 	param([Parameter(Mandatory)] $Session, [Parameter(Mandatory)] $Job)
 
 	if ($Session.Backend -eq 'PowerShell') {
-		# Filtered by job name: Get-VBRBackupSession without a filter walks every session on the server.
-		$all = @(Get-VBRUnstructuredBackupSession -Name $Job.Name -ErrorAction SilentlyContinue)
+		# Filtered by job: Get-VBRBackupSession without a filter walks every session on the server,
+		# and Get-VBRSession -Job warns that it does not support tape jobs.
+		# A session is named after the job plus the kind of run: 'files (Full)' for an active full
+		# on 13.1.1.18, so an exact -Name misses it. The name is a prefix match here, with the
+		# job's own wildcard characters escaped, and the JobId filter below decides.
+		$all = if ($Job.Kind -eq 'FileToTape') {
+			@(Get-VBRTapeBackupSession -Job $Job.Raw -ErrorAction SilentlyContinue -WarningAction SilentlyContinue)
+		} else {
+			@(Get-VBRUnstructuredBackupSession -Name ('{0}*' -f [WildcardPattern]::Escape($Job.Name)) -ErrorAction SilentlyContinue)
+		}
 		return @($all | Where-Object { ([string]$_.JobId).ToLowerInvariant() -eq $Job.Id -and [string]$_.State -ne 'Stopped' } | ForEach-Object {
 				[pscustomobject]@{ Id = [string]$_.Id; State = [string]$_.State; CreationTime = $_.CreationTime } })
 	}
@@ -474,6 +569,7 @@ function Assert-EvpVeeamJobSession {
 		Veeam runs job scripts inside the job session, so a session of Veeam.JobId must be active
 		right now; otherwise the caller is a different job and the phase stops before changing
 		anything. With -WarnOnly (dry runs) a missing session is only reported.
+		With the guard turned off for the run (-NoJobGuard) the job is still read, for its shares.
 	.OUTPUTS
 		The job record, or $null when no Veeam.JobId is configured.
 	#>
@@ -488,9 +584,13 @@ function Assert-EvpVeeamJobSession {
 
 	if (-not $Config.Veeam.JobId) { return $null }
 	$job = Get-EvpVeeamJob -Session $Session -JobId $Config.Veeam.JobId
+	if (-not $Config.Veeam.JobGuard) {
+		Write-Host "Job guard: disabled for this run; job '$($job.Name)' ($($job.Id), $($job.Kind)) read for its shares."
+		return $job
+	}
 	$active = @(Get-EvpVeeamActiveJobSessions -Session $Session -Job $job)
 	$detail = if ($active.Count) { ': ' + (($active | ForEach-Object { "$($_.State) since $($_.CreationTime)" }) -join ', ') } else { '' }
-	Write-Host "Job guard: bound to '$($job.Name)' ($($job.Id)), $($active.Count) active session(s)$detail."
+	Write-Host "Job guard: bound to '$($job.Name)' ($($job.Id), $($job.Kind)), $($active.Count) active session(s)$detail."
 	if ($active.Count -eq 0) {
 		$message = "Job guard: no session of job '$($job.Name)' ($($job.Id)) is running, so this $Phase script was not started by that job. Most likely a cloned job inherited the script settings; give the clone its own configuration file (New-EverpureVeeamJobScripts.ps1). For a manual run add -NoJobGuard."
 		if ($WarnOnly) { Write-Warning "$message (dry run: continuing)"; return $job }

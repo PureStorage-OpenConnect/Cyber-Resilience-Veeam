@@ -76,6 +76,10 @@ function Connect-EvpArray {
 		Tls           = $tls
 		ArrayName     = $null
 		PurityVersion = $null
+		# Set on fleet member sessions (Get-EvpFleetMemberSessions): every call then carries
+		# context_names and every returned item must name this context.
+		Context       = $null
+		Fleet         = $null
 	}
 	$arrays = @(Invoke-EvpArrayApi -Session $session -Path 'arrays')
 	if ($arrays.Count -gt 0) {
@@ -96,6 +100,12 @@ function Invoke-EvpArrayApi {
 	<#
 	.SYNOPSIS
 		Calls the Purity REST API and returns the items (following continuation tokens on GET).
+	.DESCRIPTION
+		For a fleet member session (Session.Context set) every call carries context_names, and
+		every returned item must name that context. An endpoint without
+		fleet support ignores context_names silently and answers for the login array; such an
+		answer is refused here, so nothing is ever listed or destroyed on the wrong array. An item
+		without a context is refused too (fail closed).
 	#>
 	[CmdletBinding()]
 	param(
@@ -109,17 +119,115 @@ function Invoke-EvpArrayApi {
 	$continuation = $null
 	do {
 		$q = @{} + $Query
+		if ($Session.Context) {
+			$q['context_names'] = $Session.Context
+			# Purity 6.12 refuses a names= search with context_names unless allow_errors is set
+			# ("Cannot specify search parameter names without allow_errors"). With one context a
+			# missing name is still an HTTP 400, so the answers do not change otherwise.
+			if ($Method -eq 'GET' -and $q.ContainsKey('names')) { $q['allow_errors'] = 'true' }
+		}
 		if ($continuation) { $q['continuation_token'] = $continuation }
 		$qs = ($q.GetEnumerator() | Sort-Object Name | ForEach-Object { '{0}={1}' -f [uri]::EscapeDataString($_.Name), [uri]::EscapeDataString([string]$_.Value) }) -join '&'
 		$uri = "$($Session.BaseUri)/$Path" + $(if ($qs) { "?$qs" } else { '' })
 		$r = Invoke-EvpHttp -Method $Method -Uri $uri -Headers $Session.Headers -Body $Body -Tls $Session.Tls
 		if (-not $r.Success) { throw "$($Session.Platform) '$($Session.Endpoint)' $Method $Path failed: $(Get-EvpHttpErrorText $r)" }
 		$body = $r.Body
+		# allow_errors can turn a partial failure into a 207 with an errors list: still a failure.
+		if ($null -ne $body -and $body.PSObject.Properties.Name -contains 'errors' -and @($body.errors).Count -gt 0) {
+			throw "$($Session.Platform) '$($Session.Endpoint)' $Method $Path failed: $((@($body.errors) | ForEach-Object { "$($_.message) ($($_.context))" }) -join '; ')"
+		}
 		if ($null -ne $body -and $body.PSObject.Properties.Name -contains 'items') { foreach ($i in @($body.items)) { if ($null -ne $i) { $items.Add($i) } } }
 		elseif ($null -ne $body) { $items.Add($body) }
 		$continuation = if ($Method -eq 'GET' -and $null -ne $body -and $body.PSObject.Properties.Name -contains 'continuation_token') { $body.continuation_token } else { $null }
 	} while ($continuation)
+	if ($Session.Context) {
+		foreach ($i in $items) {
+			$ctx = if ($i.PSObject.Properties.Name -contains 'context' -and $i.context) { [string]$i.context.name } else { $null }
+			if ($ctx -cne $Session.Context) {
+				throw "Fleet '$($Session.Fleet)': $Method $Path for member '$($Session.Context)' was answered for context '$(if ($ctx) { $ctx } else { '<none>' })'. The endpoint does not honour context_names here; refusing the answer so nothing acts on the wrong array. Give this array its own entry in arrays.jsonc."
+			}
+		}
+	}
 	return $items.ToArray()
+}
+
+function Get-EvpFleetMemberSessions {
+	<#
+	.SYNOPSIS
+		Lists the members of the fleet a session is logged in to, as sessions of their own.
+	.DESCRIPTION
+		GET fleets/members names every member. A member session is a copy of the login session
+		with Context set, so all its calls go through the login array with context_names. Members
+		that have not joined are skipped, and so are members of the other product: a FlashArray
+		login cannot reach a FlashBlade member ("Cross-product requests are not supported") and
+		the other way round. Context names are case-sensitive and used exactly as reported.
+	.OUTPUTS
+		Record with Fleet (name), Members (member name -> session) and Skipped (name -> reason).
+	#>
+	[CmdletBinding()]
+	[OutputType([psobject])]
+	param([Parameter(Mandatory)] $Session, [Parameter(Mandatory)] [string] $EntryName)
+	$fleets = @(Invoke-EvpArrayApi -Session $Session -Path 'fleets')
+	if ($fleets.Count -eq 0) { throw "'$($Session.Endpoint)' is not a member of a fleet, so arrays.jsonc entry '$EntryName' cannot be Type Fleet. Make it a plain array entry." }
+	$result = [pscustomobject]@{ Fleet = [string]$fleets[0].name; Members = [ordered]@{}; Skipped = [ordered]@{} }
+	foreach ($m in @(Invoke-EvpArrayApi -Session $Session -Path 'fleets/members')) {
+		$name = [string]$m.member.name
+		if (-not $name) { continue }
+		if ([string]$m.status -ne 'joined') { $result.Skipped[$name] = "status '$($m.status)'"; continue }
+		$member = $Session.PSObject.Copy()
+		$member.Name = $name
+		$member.ArrayName = $name
+		$member.Context = $name
+		$member.Fleet = $result.Fleet
+		try {
+			$info = @(Invoke-EvpArrayApi -Session $member -Path 'arrays')
+		} catch {
+			$reason = if ($_.Exception.Message -match 'Cross-product') { "other product than '$($Session.ArrayName)' ($($Session.Platform)); needs its own entry" } else { $_.Exception.Message }
+			$result.Skipped[$name] = $reason
+			continue
+		}
+		$member.PurityVersion = [string]$info[0].version
+		$result.Members[$name] = $member
+	}
+	return $result
+}
+
+function Get-EvpArrayFileInterfaces {
+	<#
+	.SYNOPSIS
+		Lists the enabled interfaces that serve file shares, with their addresses.
+	.DESCRIPTION
+		FlashArray: network-interfaces whose services include 'file', address in eth.address; the
+		file server is in server or, for most VIPs, attached_servers. FlashBlade: network-interfaces
+		whose services include 'data', address in address, and server.name. The server tells which
+		exports the address belongs to. Addresses are normalised through IPAddress, so IPv6
+		spellings compare equal.
+		An ActiveCluster realm VIP is listed on both arrays of the pair, each with the same
+		eth.array_availability: 'online' for the array serving it, 'available' for the standby.
+		Availability is this array's own entry there, $null for an ordinary interface.
+	.OUTPUTS
+		Records with Name, Address, Server and Availability (each possibly $null).
+	#>
+	[CmdletBinding()]
+	[OutputType([object[]])]
+	param([Parameter(Mandatory)] $Session)
+	$service = if ($Session.Platform -eq 'FlashArray') { 'file' } else { 'data' }
+	$records = foreach ($i in @(Invoke-EvpArrayApi -Session $Session -Path 'network-interfaces')) {
+		if ($i.PSObject.Properties.Name -contains 'enabled' -and -not [bool]$i.enabled) { continue }
+		if (@($i.services) -notcontains $service) { continue }
+		$address = if ($i.eth -and $i.eth.address) { [string]$i.eth.address } else { [string]$i.address }
+		$ip = $null
+		if (-not [System.Net.IPAddress]::TryParse($address, [ref]$ip)) { continue }
+		$attached = @($i.attached_servers | ForEach-Object { [string]$_.name } | Where-Object { $_ })
+		$server = if ($i.server -and $i.server.name) { [string]$i.server.name } elseif ($attached.Count -eq 1) { $attached[0] } else { $null }
+		$availability = $null
+		if ($i.eth -and $i.eth.array_availability) {
+			$own = @($i.eth.array_availability) | Where-Object { [string]$_.array.name -eq $Session.ArrayName } | Select-Object -First 1
+			if ($own) { $availability = [string]$own.status }
+		}
+		[pscustomobject]@{ Name = [string]$i.name; Address = $ip.ToString(); Server = $server; Availability = $availability }
+	}
+	return @($records)
 }
 
 #endregion
@@ -134,7 +242,9 @@ function Resolve-EvpArraySource {
 		An explicit Share.Source wins. Otherwise FlashArray resolves the export name through
 		directory-exports (filtered by the share's protocol) to a managed directory, and
 		FlashBlade resolves the share name to a file system. The result carries whether the
-		snapshot directory is exposed, which the verify phase reports.
+		snapshot directory is exposed, which the verify phase reports. Share.ServerHint, the
+		file server of the interface the share was mapped through, settles an export name that
+		exists on more than one server.
 	#>
 	[CmdletBinding()]
 	[OutputType([psobject])]
@@ -150,6 +260,10 @@ function Resolve-EvpArraySource {
 		$matching = @($exports | Where-Object { [string]$_.policy.resource_type -like "*$proto*" -or [string]$_.policy.resource_type -eq '' })
 		if ($matching.Count -eq 0 -and $exports.Count -gt 0) { throw "FlashArray export '$shareName' exists but not for $($Share.Protocol) (policies: $(($exports | ForEach-Object { $_.policy.resource_type }) -join ', '))." }
 		$dirs = @($matching | ForEach-Object { [string]$_.directory.name } | Sort-Object -Unique)
+		if ($dirs.Count -gt 1 -and $Share.ServerHint) {
+			$onServer = @($matching | Where-Object { [string]$_.server.name -eq $Share.ServerHint } | ForEach-Object { [string]$_.directory.name } | Sort-Object -Unique)
+			if ($onServer.Count -gt 0) { $dirs = $onServer }
+		}
 		if ($dirs.Count -eq 0) { throw "FlashArray '$($Session.Endpoint)' has no directory export named '$shareName'. Check the share name or set Shares[].Source to the managed directory explicitly." }
 		if ($dirs.Count -gt 1) { throw "FlashArray export '$shareName' maps to $($dirs.Count) directories ($($dirs -join ', ')); set Shares[].Source explicitly." }
 		return (Get-EvpArraySourceInfo -Session $Session -SourceName $dirs[0])
@@ -162,7 +276,12 @@ function Resolve-EvpArraySource {
 	$exports = @()
 	try { $exports = @(Invoke-EvpArrayApi -Session $Session -Path 'file-system-exports' -Query @{ filter = $exportFilter }) }
 	catch { Write-Verbose "file-system-exports not available, using the file system name: $($_.Exception.Message)" }
-	$members = @($exports | Where-Object { [string]$_.policy_type -eq $Share.Protocol } | ForEach-Object { [string]$_.member.name } | Where-Object { $_ } | Sort-Object -Unique)
+	$ofProtocol = @($exports | Where-Object { [string]$_.policy_type -eq $Share.Protocol })
+	$members = @($ofProtocol | ForEach-Object { [string]$_.member.name } | Where-Object { $_ } | Sort-Object -Unique)
+	if ($members.Count -gt 1 -and $Share.ServerHint) {
+		$onServer = @($ofProtocol | Where-Object { [string]$_.server.name -eq $Share.ServerHint } | ForEach-Object { [string]$_.member.name } | Where-Object { $_ } | Sort-Object -Unique)
+		if ($onServer.Count -gt 0) { $members = $onServer }
+	}
 	if ($members.Count -gt 1) {
 		throw "FlashBlade $($Share.Protocol) export '$shareName' exists for $($members.Count) file systems ($($members -join ', ')) on different servers; set Shares[].Source explicitly."
 	}

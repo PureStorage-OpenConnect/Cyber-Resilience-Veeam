@@ -5,7 +5,74 @@ here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 scripts follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version is
 declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start of every run.
 
-## [Unreleased]
+## [1.1.0] - 2026-10-23 <!-- style-check: ignore -->
+
+### Added
+
+- **Shares from the job.** With `Veeam.JobId` set, the shares are read from the Veeam job at run
+  time; the job configuration needs no `Shares` list. Objects that are not SMB shares or NFS
+  exports are reported and skipped. `Shares` entries now override `Array` or `Source` for single
+  shares of the job.
+- **Shares mapped to arrays automatically.** A share without an `Array` belongs to the array that
+  owns its host address as a file interface (FlashArray service `file`, FlashBlade service
+  `data`); host names are resolved through DNS. The FlashBlade file server of that interface also
+  settles an export name that exists on two servers. An unreachable array is a warning while
+  every share still maps to another array.
+- **Global arrays file.** `arrays.jsonc` beside the job configurations (or `ArraysFile`) lists
+  every array once for all jobs; `arrays.sample.jsonc` documents it, and the generator creates it
+  empty the first time.
+- **State of the last run.** `<profile>.state.json` (default `<install>\state`, `State.Directory`
+  to change it) records each job's shares, arrays and sources. A run asks the arrays of the last
+  run first. Tagged snapshots on the source of a share that has left the job are cleaned up by
+  the sweep and the post phase until none is left.
+- **File-to-tape jobs.** The job guard, the share discovery and the generator's job lookup work
+  for file-to-tape jobs as well as file backup jobs. Objects that are not shares, such as the
+  bucket of an object-storage-to-tape job, are reported and skipped.
+- **Fleets.** An `arrays.jsonc` entry with `"Type": "Fleet"` reaches every member of an Everpure
+  fleet of the same product through one endpoint and one token (`context_names`). Every answer
+  must name the member it was meant for; anything else is refused. `-Fleet` on the secrets
+  helper adds such an entry and lists the members. FlashBlades need a plain entry each, since
+  Purity//FB 4.8 does not take `context_names` on `network-interfaces`.
+- **ActiveCluster for File.** When a realm VIP is listed on both arrays of a pair, the share <!-- style-check: ignore -->
+  maps to the array that reports itself `online` for it, also against the array of the last run.
+- **Failures stay with the shares they concern.** A share that cannot be mapped, whose array is
+  unreachable, whose source cannot be snapshotted or that cannot be repointed gets the fail-safe
+  path on its own; the other shares back up from their snapshots. New exit code 11 for such a
+  partial run. `Behaviour.FailSafeScope: "Job"` keeps the 1.0.0 all-or-nothing behaviour.
+- **Live fallback, opt-in.** `Behaviour.OnFailure: "LiveFallback"` gives a share that cannot be
+  backed up from a snapshot Veeam's failover to direct backup, so the live share is backed up
+  instead of failing. Veeam reports that share as a success; only the scripts' exit codes turn
+  the job into a warning. `"FailSafe"` stays the default; `"None"` is the 1.0.0
+  `FailSafePath: false`, which keeps working.
+- `Protect-EverpureVeeamSecret.ps1 -Array <name> -Endpoint <address>` adds the array to
+  `arrays.jsonc` (keeping the file's comments), then stores and verifies its token. `-Array
+  <name>` alone (or `-Array *`) takes the token file, endpoint and TLS policy from
+  `arrays.jsonc`, so nothing is typed twice. `-Path` and `-Endpoint` still work.
+
+### Changed
+
+- With `Veeam.JobId` and the PowerShell backend, the job is the share list. A job share missing
+  from `Shares`, which 1.0.0 backed up live (verify reported it), is now protected. A `Shares`
+  entry for a share that is not in the job is ignored with a warning instead of being repointed.
+  Configurations without `Veeam.JobId`, and the REST backend, work as before.
+- `-NoJobGuard` keeps reading the job for its shares; it only skips the session check.
+- `New-EverpureVeeamJobScripts.ps1` stops and writes nothing when the job name matches no job or
+  several, and checks a given `-JobId` against the server when the Veeam module is available.
+  `-NoJobId` writes a configuration without a job binding on purpose.
+- The post phase continues on the arrays it can reach when one is unreachable (exit code 4), and
+  leaves that array's sources for the next run.
+- A pre phase in which only some shares fail no longer puts every share on the fail-safe path
+  (see FailSafeScope above). A share missing from the Veeam inventory is reported and the others
+  go on.
+- The array API token also needs to read network interfaces (the `storage_admin` role does).
+
+### Fixed
+
+- The job guard refused the scripts of an active full run (also in 1.0.0), because Veeam names
+  that session `<job> (Full)` and the session lookup matched the job name exactly. It now matches
+  the name as a prefix and decides by job ID.
+- Verify counted destroyed snapshots that wait for eradication as existing (also in 1.0.0). It
+  now counts them apart from the live ones.
 
 ## [1.0.0] - 2026-10-22 <!-- style-check: ignore -->
 

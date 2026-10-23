@@ -8,7 +8,7 @@
 
 @{
 	RootModule           = 'EverpureVeeamNas.psm1'
-	ModuleVersion        = '1.0.0'
+	ModuleVersion        = '1.1.0'
 	GUID                 = 'beffbcbb-7247-4f5e-9d58-118514433ec2'
 	Author               = 'Stefan Zimmermann'
 	CompanyName          = 'Everpure, Inc.'

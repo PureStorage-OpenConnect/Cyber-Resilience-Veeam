@@ -90,6 +90,15 @@ function New-LabRoutes {
 		New-MockResponse -Body @{ username = 'svc-backup' } -Headers @{ 'x-auth-token' = 'fa-session' }
 	}
 	$routes['GET ^https://fa/api/2\.42/arrays$'] = { @{ items = @(@{ name = 'fa01'; os = 'Purity//FA'; version = '6.8.5' }) } }
+	# Shaped like Purity//FA 6.x: the file VIP carries service 'file'; management and a disabled
+	# file interface must not count.
+	$routes['GET ^https://fa/api/2\.42/network-interfaces$'] = {
+		@{ items = @(
+				@{ name = 'ct0.eth0'; enabled = $true; services = @('management'); interface_type = 'eth'; eth = @{ address = '198.51.100.10'; subtype = 'physical' } },
+				@{ name = 'filevip'; enabled = $true; services = @('file'); interface_type = 'eth'; eth = @{ address = '192.0.2.10'; subtype = 'vif' } },
+				@{ name = 'filevip-old'; enabled = $false; services = @('file'); interface_type = 'eth'; eth = @{ address = '192.0.2.99'; subtype = 'vif' } }
+			) }
+	}
 	$routes['GET ^https://fa/api/2\.42/directory-exports\?export_names=(.+)$'] = {
 		param($r, $m)
 		$name = $m.Groups[1].Value
@@ -134,10 +143,21 @@ function New-LabRoutes {
 		New-MockResponse -Body @{ username = 'svc-backup' } -Headers @{ 'x-auth-token' = 'fb-session' }
 	}
 	$routes['GET ^https://fb/api/2\.17/arrays$'] = { @{ items = @(@{ name = 'fb01'; os = 'Purity//FB'; version = '4.5.2' }) } }
+	# Shaped like Purity//FB 4.x: data VIPs per file server, plus a management VIP. FbExtraAddress
+	# adds a data VIP with an address of the caller's choice, to model an address owned twice.
+	$routes['GET ^https://fb/api/2\.17/network-interfaces$'] = {
+		$items = @(
+			@{ name = 'vir0'; enabled = $true; services = @('management'); address = '198.51.100.20'; type = 'vip' },
+			@{ name = 'data1'; enabled = $true; services = @('data'); address = '192.0.2.20'; type = 'vip'; server = @{ name = 'srv1' } },
+			@{ name = 'data2'; enabled = $true; services = @('data'); address = '192.0.2.21'; type = 'vip'; server = @{ name = 'srv2' } }
+		)
+		if ($State.FbExtraAddress) { $items += , @{ name = 'data3'; enabled = $true; services = @('data'); address = $State.FbExtraAddress; type = 'vip'; server = @{ name = 'srv1' } } }
+		@{ items = $items }
+	}
 	$routes['GET ^https://fb/api/2\.17/file-systems\?names=(.+)$'] = {
 		param($r, $m)
 		$name = $m.Groups[1].Value
-		if ($name -in 'projects-nfs', 'projects-smb', 'renamed-fs') {
+		if ($name -in 'projects-nfs', 'projects-smb', 'renamed-fs', 'fs-a', 'fs-b') {
 			$enabled = if ($null -ne $State.FbSnapshotDirEnabled) { $State.FbSnapshotDirEnabled } else { $true }
 			return @{ items = @(@{ name = $name; snapshot_directory_enabled = $enabled; nfs = @{ export_name = '' }; smb = @{ share_name = '' } }) }
 		}
@@ -201,6 +221,75 @@ function New-LabRoutes {
 		if ($j) { $j } else { New-MockResponse -Status 404 -Body @{ message = 'job not found' } }
 	}
 	$routes['GET ^https://vbr:9419/api/v1/sessions\?jobIdFilter=([^&]+)&limit=200$'] = { param($r, $m); @{ data = @($State.VeeamSessions | Where-Object { $_.jobId -eq $m.Groups[1].Value }) } }
+
+	# --- Fleet: login on 'fl' (member FLA), shaped like Purity//FA 6.12.3 in the lab ----------
+	# Members FLA, FLB (FlashArrays), FBX (FlashBlade: cross-product, refused) and FLC (not joined).
+	# The ActiveCluster realm VIP 192.0.2.30 is listed on FLA and FLB with the same
+	# array_availability (FLA available, FLB online). FlIgnoreContext answers every call for FLA,
+	# like an endpoint that ignores context_names; FlPostNoContext leaves the context out of POST
+	# answers. Context names are case-sensitive, as on the arrays.
+	$routes['GET ^https://fl/api/api_version$'] = { @{ version = @('2.0', '2.42') } }
+	$routes['POST ^https://fl/api/2\.42/login$'] = {
+		param($r)
+		if ($r.Headers['api-token'] -ne 'fl-token') { return (New-MockResponse -Status 400 -Body @{ errors = @(@{ message = 'Unable to list user for API token.' }) }) }
+		New-MockResponse -Body @{ username = 'svc-backup' } -Headers @{ 'x-auth-token' = 'fl-session' }
+	}
+	$fleetHandler = {
+		param($r, $m)
+		$path = $m.Groups['path'].Value
+		$q = @{}
+		foreach ($kv in ($m.Groups['q'].Value -split '&')) { if ($kv) { $k, $v = $kv -split '=', 2; $q[$k] = $v } }
+		$ctx = if ($q['context_names']) { $q['context_names'] } else { 'FLA' }
+		if ($q['context_names']) {
+			if ($ctx -cnotin @('FLA', 'FLB', 'FBX', 'FLC')) { return (New-MockResponse -Status 400 -Body @{ errors = @(@{ message = 'Cannot find array in fleet' }) }) }
+			if ($ctx -ceq 'FBX') { return (New-MockResponse -Status 400 -Body @{ errors = @(@{ message = 'Cross-product requests are not supported' }) }) }
+			if ($r.Method -eq 'GET' -and $q.ContainsKey('names') -and $q['allow_errors'] -ne 'true') { return (New-MockResponse -Status 400 -Body @{ errors = @(@{ message = 'Cannot specify search parameter names without allow_errors.' }) }) }
+		}
+		$answer = if ($State.FlIgnoreContext) { 'FLA' } else { $ctx }
+		$items = switch -Regex ($path) {
+			'^fleets$' { return @{ items = @(@{ name = 'LABFLEET'; is_local = $true }) } }
+			'^fleets/members$' {
+				return @{ items = @(
+						@{ member = @{ name = 'FLA'; resource_type = 'remote-arrays' }; status = 'joined' },
+						@{ member = @{ name = 'FLB'; resource_type = 'remote-arrays' }; status = 'joined' },
+						@{ member = @{ name = 'FBX'; resource_type = 'remote-arrays' }; status = 'joined' },
+						@{ member = @{ name = 'FLC'; resource_type = 'remote-arrays' }; status = 'joining' }) }
+			}
+			'^arrays$' { , @{ name = $answer; os = 'Purity//FA'; version = '6.12.3' } }
+			'^network-interfaces$' {
+				$own = if ($answer -ceq 'FLA') { '192.0.2.40' } else { '192.0.2.41' }
+				$availability = @(@{ array = @{ name = 'FLA' }; status = 'available' }, @{ array = @{ name = 'FLB' }; status = 'online' })
+				@(@{ name = 'ct0.eth0'; enabled = $true; services = @('management'); eth = @{ address = '198.51.100.40' } },
+					@{ name = 'filevip'; enabled = $true; services = @('file'); server = $null; attached_servers = @(@{ name = '_array_server' }); eth = @{ address = $own; array_availability = $null } },
+					@{ name = 'realm1::srv1::vip'; enabled = $true; services = @('file'); server = @{ name = 'realm1::srv1' }; attached_servers = @(@{ name = 'realm1::srv1' }); eth = @{ address = '192.0.2.30'; array_availability = $availability } })
+			}
+			'^directory-exports$' {
+				$exports = @(
+					@{ on = 'FLA'; export_name = 'fla-share'; directory = @{ name = 'fsa:dir1' }; policy = @{ resource_type = 'policies/smb' }; server = @{ name = '_array_server' } },
+					@{ on = 'FLB'; export_name = 'flb-share'; directory = @{ name = 'fsb:dir1' }; policy = @{ resource_type = 'policies/smb' }; server = @{ name = '_array_server' } },
+					@{ on = 'FLA'; export_name = 'ac-share'; directory = @{ name = 'pod1::fsac:root' }; policy = @{ resource_type = 'policies/smb' }; server = @{ name = 'realm1::srv1' } },
+					@{ on = 'FLB'; export_name = 'ac-share'; directory = @{ name = 'pod1::fsac:root' }; policy = @{ resource_type = 'policies/smb' }; server = @{ name = 'realm1::srv1' } })
+				@($exports | Where-Object { $_.on -ceq $answer -and $_.export_name -eq $q['export_names'] })
+			}
+			'^directories$' { , @{ name = $q['names'] } }
+			'^directory-snapshots$' {
+				if ($r.Method -eq 'POST') {
+					$name = '{0}.{1}.{2}' -f $q['source_names'], $r.Body.client_name, $r.Body.suffix
+					$State.FlSnapshots += , @{ name = $name; on = $answer; source = @{ name = $q['source_names'] }; destroyed = $false; created = 0 }
+					if ($State.FlPostNoContext) { return @{ items = @(@{ name = $name }) } }
+					, @{ name = $name }
+				} elseif ($r.Method -eq 'PATCH') {
+					foreach ($s in $State.FlSnapshots) { if ($s.name -eq $q['names'] -and $s.on -ceq $answer) { $s.destroyed = $true } }
+					, @{ name = $q['names']; destroyed = $true }
+				} else {
+					@($State.FlSnapshots | Where-Object { $_.on -ceq $answer -and $_.source.name -eq $q['source_names'] } | ForEach-Object { @{ name = $_.name; source = $_.source; destroyed = $_.destroyed; created = $_.created } })
+				}
+			}
+			default { return (New-MockResponse -Status 404 -Body @{ errors = @(@{ message = "no fleet mock for $path" }) }) }
+		}
+		@{ items = @($items | ForEach-Object { $c = @{} + $_; $c.Remove('on'); $c['context'] = @{ name = $answer; resource_type = 'remote-arrays' }; $c }) }
+	}
+	foreach ($method in 'GET', 'POST', 'PATCH') { $routes["$method ^https://fl/api/2\.42/(?<path>[^?]+)(\?(?<q>.*))?$"] = $fleetHandler }
 	return $routes
 }
 
@@ -215,6 +304,9 @@ function New-LabState {
 		VeeamSaveResult      = 'Success'
 		VeeamJobs            = @()
 		VeeamSessions        = @()
+		FlSnapshots          = @()
+		FlIgnoreContext      = $false
+		FlPostNoContext      = $false
 		VeeamShares          = @(
 			[pscustomobject]@{ id = 'smb-1'; type = 'SMBShare'; path = '\\192.0.2.10\finance-smb'; advancedSettings = [pscustomobject]@{ processingMode = 'Direct'; directBackupFailoverEnabled = $true; storageSnapshotPath = '' } },
 			[pscustomobject]@{ id = 'nfs-1'; type = 'NFSShare'; path = '192.0.2.20:/projects-nfs'; advancedSettings = [pscustomobject]@{ processingMode = 'Direct'; directBackupFailoverEnabled = $true; storageSnapshotPath = '' } }
@@ -264,22 +356,44 @@ function Set-VBRNASSMBServer { param($Server, [string]$StorageSnapshotPath, [swi
 	Write-StubCall ([ordered]@{ Cmdlet = 'Set-VBRNASSMBServer'; Path = $Server.Path; StorageSnapshotPath = $StorageSnapshotPath; Failover = $EnableDirectBackupFailover.IsPresent; Mode = $ProcessingMode }) }
 function Set-VBRNASNFSServer { param($Server, [string]$StorageSnapshotPath, [switch]$EnableDirectBackupFailover, [string]$ProcessingMode, $ErrorAction)
 	Write-StubCall ([ordered]@{ Cmdlet = 'Set-VBRNASNFSServer'; Path = $Server.Path; StorageSnapshotPath = $StorageSnapshotPath; Failover = $EnableDirectBackupFailover.IsPresent; Mode = $ProcessingMode }) }
-# Jobs from EVP_TEST_JOBS (JSON array of {Id, Name, ShareRoots[]}), sessions from EVP_TEST_SESSIONS
-# (JSON array of {Id, JobId, Name, State}); both model the lab cmdlets' shapes.
+# Jobs from EVP_TEST_JOBS (JSON array of {Id, Name, ShareRoots[], Kind}; Kind 'FileToTape' makes
+# a file-to-tape job), sessions from EVP_TEST_SESSIONS (JSON array of {Id, JobId, Name, State});
+# both model the lab cmdlets' shapes. A tape job object names its share in Server.Name, and its
+# Path carries the 'nfs41://' prefix for NFS, as on 13.1.1.18.
+function Get-StubJobs { if ($env:EVP_TEST_JOBS) { @($env:EVP_TEST_JOBS | ConvertFrom-Json) } else { @() } }
+function Get-StubObjectId([string] $Path) { $h = [System.Security.Cryptography.MD5]::HashData([System.Text.Encoding]::UTF8.GetBytes($Path.ToLowerInvariant())); [guid]::new($h) }
 function Get-VBRUnstructuredBackupJob { param([string[]]$Name, [string[]]$Id, $ErrorAction, $WarningAction)
-	$jobs = @(); if ($env:EVP_TEST_JOBS) { $jobs = @($env:EVP_TEST_JOBS | ConvertFrom-Json) }
-	foreach ($j in $jobs) {
+	foreach ($j in (Get-StubJobs)) {
+		if ($j.Kind -eq 'FileToTape') { continue }
 		if ($Id -and ([string]$Id[0]).ToLowerInvariant() -ne ([string]$j.Id).ToLowerInvariant()) { continue }
 		if ($Name -and $Name[0] -ne $j.Name) { continue }
-		[pscustomobject]@{ Id = [guid]$j.Id; Name = [string]$j.Name; BackupObject = @($j.ShareRoots | ForEach-Object { [pscustomobject]@{ Path = $_; Server = [pscustomobject]@{ Path = $_ } } }) }
+		[pscustomobject]@{ Id = [guid]$j.Id; Name = [string]$j.Name; BackupObject = @($j.ShareRoots | ForEach-Object { [pscustomobject]@{ Path = $_; Server = [pscustomobject]@{ Path = $_; Id = (Get-StubObjectId $_) } } }) }
+	} }
+function Get-VBRTapeJob { param([string[]]$Name, $ErrorAction, $WarningAction)
+	foreach ($j in (Get-StubJobs)) {
+		if ($j.Kind -ne 'FileToTape') { continue }
+		if ($Name -and $Name[0] -ne $j.Name) { continue }
+		[pscustomobject]@{ Id = [guid]$j.Id; Name = [string]$j.Name; Type = 'FileToTape'; Object = @($j.ShareRoots | ForEach-Object {
+				# '@<server type>' models an object without a path, like the bucket of an
+				# object-storage-to-tape job (VBRObjectStorageBackupJobObject, Server.Type S3CompatibleServer).
+				if ($_ -like '@*') { return [pscustomobject]@{ Path = ''; Server = [pscustomobject]@{ Name = ''; Id = [guid]::Empty; Type = $_.Substring(1) } } }
+				$path = if ($_ -match '^[^\\]+:/') { "nfs41://$_" } else { $_ }
+				[pscustomobject]@{ Path = $path; Server = [pscustomobject]@{ Name = $_; Id = (Get-StubObjectId $_); Type = $(if ($_ -like '\\*') { 'CifsShare' } else { 'NfsShare' }) } } }) }
 	} }
 function Get-VBRUnstructuredBackupSession { param([string[]]$Name, $ErrorAction)
+	# -Name takes wildcards, like the real cmdlet; a session of an active full is named 'job (Full)'.
 	$sessions = @(); if ($env:EVP_TEST_SESSIONS) { $sessions = @($env:EVP_TEST_SESSIONS | ConvertFrom-Json) }
 	foreach ($s in $sessions) {
-		if ($Name -and $s.Name -notin $Name) { continue }
+		if ($Name -and -not ($Name | Where-Object { $s.Name -like $_ })) { continue }
 		[pscustomobject]@{ Id = [guid]$s.Id; JobId = [guid]$s.JobId; Name = [string]$s.Name; State = [string]$s.State; CreationTime = [datetime]'2026-01-01T00:00:00Z' }
 	} }
-Export-ModuleMember -Function Connect-VBRServer, Disconnect-VBRServer, Get-VBRServerSession, Get-VBRUnstructuredServer, Set-VBRNASSMBServer, Set-VBRNASNFSServer, Get-VBRUnstructuredBackupJob, Get-VBRUnstructuredBackupSession
+function Get-VBRTapeBackupSession { param($Job, [string[]]$Name, $ErrorAction, $WarningAction)
+	$sessions = @(); if ($env:EVP_TEST_SESSIONS) { $sessions = @($env:EVP_TEST_SESSIONS | ConvertFrom-Json) }
+	foreach ($s in $sessions) {
+		if ($Job -and [string]$s.JobId -ne [string]$Job.Id) { continue }
+		[pscustomobject]@{ Id = [guid]$s.Id; JobId = [guid]$s.JobId; Name = [string]$s.Name; State = [string]$s.State; CreationTime = [datetime]'2026-01-01T00:00:00Z' }
+	} }
+Export-ModuleMember -Function Connect-VBRServer, Disconnect-VBRServer, Get-VBRServerSession, Get-VBRUnstructuredServer, Set-VBRNASSMBServer, Set-VBRNASNFSServer, Get-VBRUnstructuredBackupJob, Get-VBRUnstructuredBackupSession, Get-VBRTapeJob, Get-VBRTapeBackupSession
 '@
 	[System.IO.File]::WriteAllText((Join-Path $moduleDir 'Veeam.Backup.PowerShell.psm1'), $content, [System.Text.UTF8Encoding]::new($false))
 	return $Root
@@ -330,6 +444,8 @@ function New-LabConfigFile {
 		Snapshot  = [ordered]@{ Tag = 'Veeam-Backup'; KeepFor = '1d' }
 		Behaviour = [ordered]@{}
 		Logging   = [ordered]@{ Directory = 'log'; RetentionDays = 1 }
+		# Beside the configuration: the Windows default (<install>\state) would be the repository.
+		State     = [ordered]@{ Directory = 'state' }
 	}
 	if ($Backend -eq 'Rest') { $config.Veeam['User'] = 'svc'; $config.Veeam['PasswordFile'] = 'secrets/vbr.pwd' }
 	foreach ($section in $Overrides.Keys) {

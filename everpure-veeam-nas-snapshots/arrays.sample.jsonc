@@ -1,0 +1,39 @@
+// Sample arrays file for Invoke-EverpureVeeamNasSnapshot.ps1. One file for all jobs.
+//
+// New-EverpureVeeamJobScripts.ps1 copies it to jobs/arrays.jsonc the first time it runs. List
+// every FlashArray and FlashBlade whose shares any Veeam job backs up; the scripts work out which
+// array serves which share from the arrays' file interfaces, so nothing here names a share.
+// The list starts empty, so a job configuration from 1.0.0 with its own Arrays keeps working
+// unchanged beside it. Relative paths resolve against this file's directory.
+//
+// NEVER put a token in this file. The easy way to add an array is the secrets helper, from an
+// elevated PowerShell: .\Protect-EverpureVeeamSecret.ps1 -Array fa01 -Endpoint fa01.example.com
+// adds the entry below, prompts for the API token, stores it at ApiTokenFile and tests it.
+// Entries can also be added or edited by hand; -Array fa01 then stores or replaces the token.
+// // and /* */ comments are allowed; '#' is not.
+//
+// Per array:
+//   Name          used in logs, in the state file and in Shares[].Array overrides
+//   Type          "Array" (default) or "Fleet": the endpoint is one member of an Everpure fleet,
+//                 and every member of the same product (FlashArray or FlashBlade) is reached
+//                 through it with this one token, by the name Purity gives it (as in
+//                 Shares[].Array overrides and the state file). Add one with
+//                 .\Protect-EverpureVeeamSecret.ps1 -Array fleet01 -Endpoint fa01.example.com -Fleet.
+//                 Fleets cannot reach the other product: list FlashBlades in a fleet of
+//                 FlashArrays separately. A member with an entry of its own uses that entry.
+//                 FlashArray endpoints only for now: Purity//FB 4.8 refuses context_names on
+//                 network-interfaces, so give each FlashBlade a plain entry.
+//   Endpoint      management address
+//   ApiTokenFile  file written by Protect-EverpureVeeamSecret.ps1. A relative path is relative to
+//                 the folder holding this file, which is the jobs folder (jobs/arrays.jsonc):
+//                 "secrets/fa01.token" is jobs\secrets\fa01.token. An absolute path works too.
+//   Platform      "auto" (default) detects FlashArray vs FlashBlade
+//   Tls           "skip" (default; both ship self-signed certificates), "system" (trust store) or
+//                 "thumbprint:<SHA-1 or SHA-256 hex>" (Protect-EverpureVeeamSecret.ps1 -Array <name> prints it)
+{
+	"Arrays": [
+		// { "Name": "fa01", "Endpoint": "fa01.example.com", "ApiTokenFile": "secrets/fa01.token", "Platform": "auto", "Tls": "skip" },
+		// { "Name": "fb01", "Endpoint": "fb01.example.com", "ApiTokenFile": "secrets/fb01.token", "Platform": "auto", "Tls": "skip" },
+		// { "Name": "fleet01", "Type": "Fleet", "Endpoint": "fa02.example.com", "ApiTokenFile": "secrets/fleet01.token", "Platform": "auto", "Tls": "skip" }
+	]
+}

@@ -16,4 +16,6 @@ lab/
 # server, never in a clone. config.sample.jsonc stays tracked.
 everpure-veeam-nas-snapshots/jobs/
 everpure-veeam-nas-snapshots/secrets/
+everpure-veeam-nas-snapshots/state/
+*.state.json
 *.token
