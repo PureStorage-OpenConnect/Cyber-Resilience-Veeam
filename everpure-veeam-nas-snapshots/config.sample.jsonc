@@ -1,19 +1,22 @@
-// Sample configuration for Invoke-EverpureVeeamNasSnapshot.ps1. One file per Veeam file backup job.
+// Sample configuration for Invoke-EverpureVeeamNasSnapshot.ps1. One file per Veeam file backup
+// or file-to-tape job.
 //
-// Copy it, name it after the job (the file name becomes the profile name in the log file names),
-// and pass it with -ConfigFile. Relative paths resolve against this file's directory, so the same
-// file works on a Windows backup server and on the Veeam Software Appliance.
+// New-EverpureVeeamJobScripts.ps1 writes it as jobs/<job>.jsonc (the file name becomes the profile
+// name in the log and state file names) with the job's ID filled in. That is all a job needs: the
+// shares are read from the job at run time, and each share is mapped to its array through the
+// arrays listed once in arrays.jsonc beside this file. Relative paths resolve against this file's
+// directory, so the same file works on a Windows backup server and on the Veeam Software Appliance.
 //
 // NEVER put a token or password in this file. Point at files written by
 // Protect-EverpureVeeamSecret.ps1 instead. // and /* */ comments are allowed; '#' is not.
 {
 	"Veeam": {
-		// Optional: ID of the Veeam job this file belongs to. New-EverpureVeeamJobScripts.ps1
-		// fills it in (-JobId, or looked up by job name on a Windows backup server). When set,
-		// the pre and post phases refuse to run unless a session of exactly this job is active,
-		// so a cloned job that inherited the script settings cannot repoint these shares or
-		// destroy these snapshots. The verify phase also compares the job's shares with Shares
-		// below. Empty disables the guard.
+		// ID of the Veeam job this file belongs to. New-EverpureVeeamJobScripts.ps1 fills it in
+		// (-JobId, or looked up by job name on a Windows backup server). It names the job whose
+		// shares are backed up, and it is the job guard: the pre and post phases refuse to run
+		// unless a session of exactly this job is active, so a cloned job that inherited the
+		// script settings cannot repoint these shares or destroy these snapshots. Empty: no guard,
+		// and Shares below must list every share of the job.
 		"JobId": "",
 
 		// auto: Veeam PowerShell module when it imports (Windows backup server), REST otherwise
@@ -49,23 +52,22 @@
 		"AcknowledgeRestDefect": false
 	},
 
-	// Every array the job's shares live on. Platform "auto" detects FlashArray vs FlashBlade.
-	"Arrays": [
-		{ "Name": "fa01", "Endpoint": "fa01.lab.local", "ApiTokenFile": "secrets/fa01.token", "Platform": "auto", "Tls": "skip" },
-		{ "Name": "fb01", "Endpoint": "fb01.lab.local", "ApiTokenFile": "secrets/fb01.token", "Platform": "auto", "Tls": "skip" }
-	],
+	// Arrays come from arrays.jsonc beside this file (see arrays.sample.jsonc), shared by all jobs.
+	// Another location: "ArraysFile": "../arrays.jsonc". An "Arrays" list here still works, as in
+	// 1.0.0, and adds to the arrays file; a name defined in both is an error.
 
-	// Every share of the job, exactly as it appears in the Veeam inventory.
-	//   SMB: \\\\server\\share   NFS: server:/export
-	// Source "auto" maps the share to its FlashArray managed directory (via directory exports)
-	// or FlashBlade file system. Set it explicitly only when the automatic mapping is ambiguous:
-	// FlashArray "filesystem:directory", FlashBlade the file system name.
-	"Shares": [
-		{ "VeeamPath": "\\\\192.0.2.10\\finance-smb",   "Array": "fa01", "Source": "auto" },
-		{ "VeeamPath": "192.0.2.10:/finance-nfs",       "Array": "fa01", "Source": "auto" },
-		{ "VeeamPath": "\\\\192.0.2.20\\projects-smb", "Array": "fb01", "Source": "auto" },
-		{ "VeeamPath": "192.0.2.20:/projects-nfs",   "Array": "fb01", "Source": "auto" }
-	],
+	// Optional overrides for single shares of the job, matched by the path as the Veeam inventory
+	// shows it (SMB: \\\\server\\share, NFS: server:/export). Normally nothing goes here: each
+	// share is mapped to the array that owns its address as a file interface, and to its
+	// FlashArray managed directory (through directory exports) or FlashBlade file system.
+	//   Array   pin the array, when the address alone is ambiguous
+	//   Source  pin the FlashArray "filesystem:directory" or the FlashBlade file system name
+	// An entry for a share that is not in the job is ignored with a warning. Without Veeam.JobId
+	// this list is the share list and must name every share of the job.
+	// "Shares": [
+	//	{ "VeeamPath": "\\\\192.0.2.10\\finance-smb", "Array": "fa01" },
+	//	{ "VeeamPath": "192.0.2.20:/projects-nfs", "Source": "projects" }
+	// ],
 
 	"Snapshot": {
 		// Tag in every snapshot name. Letters, digits and '-', 1 to 40 characters.
@@ -114,5 +116,13 @@
 		// on the appliance.
 		// "Directory": "log",
 		"RetentionDays": 30
+	},
+
+	"State": {
+		// The state of the last run (<profile>.state.json: shares, their arrays and sources, no
+		// secrets). It lets a run ask the right array first, and keeps cleaning up the snapshots
+		// of a share that has left the job. Deleting it is harmless. Default: <install>\state on
+		// Windows, /var/lib/veeam/scripts/sandbox/everpure-veeam-nas/state on the appliance.
+		// "Directory": "state"
 	}
 }

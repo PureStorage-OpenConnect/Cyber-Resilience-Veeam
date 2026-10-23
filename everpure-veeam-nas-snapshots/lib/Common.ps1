@@ -143,8 +143,9 @@ function Get-EvpConfig {
 	.PARAMETER Path
 		Path to the JSON (with comments) configuration file.
 	.OUTPUTS
-		Ordered hashtable with the sections Veeam, Arrays, Shares, Snapshot, Behaviour, Logging
-		and the meta keys ConfigPath, ConfigDirectory and ProfileName.
+		Ordered hashtable with the sections Veeam, Arrays (merged from the arrays file and this
+		file), Shares, Snapshot, Behaviour, Logging, State and the meta keys ConfigPath,
+		ConfigDirectory, ProfileName and ArraysFile ($null when there is none).
 	#>
 	[CmdletBinding()]
 	[OutputType([System.Collections.Specialized.OrderedDictionary])]
@@ -188,41 +189,35 @@ function Get-EvpConfig {
 		ApiVersion                = if (Get-EvpProperty $v 'ApiVersion') { [string](Get-EvpProperty $v 'ApiVersion') } else { '1.3-rev2' }
 		AcknowledgeRestDefect     = if ($null -ne $ack) { [bool]$ack } else { $false }
 		JobId                     = $jobId.ToLowerInvariant()
+		# Not a file setting: -NoJobGuard turns it off for one run and keeps JobId, which also
+		# names the job the shares are read from.
+		JobGuard                  = [bool]$jobId
 	}
 
 	# --- Arrays ------------------------------------------------------------------------------
+	# The global arrays file (one for all jobs, default arrays.jsonc beside this file) plus any
+	# Arrays listed here, as 1.0.0 required. A name defined twice is an error, not an override.
 	$arrays = [ordered]@{}
-	$rawArrays = @(Get-EvpProperty $raw 'Arrays' | Where-Object { $null -ne $_ })
-	if ($rawArrays.Count -eq 0) { $problems.Add('Arrays must list at least one array.') }
-	$index = 0
-	foreach ($a in $rawArrays) {
-		$index++
-		$name = [string](Get-EvpProperty $a 'Name')
-		if (-not $name) { $problems.Add("Arrays[$index] has no Name."); continue }
-		if ($arrays.Contains($name)) { $problems.Add("Arrays: the name '$name' is used more than once."); continue }
-		$platform = [string](Get-EvpProperty $a 'Platform')
-		if (-not $platform) { $platform = 'auto' }
-		if ($platform -notin @('auto', 'FlashArray', 'FlashBlade')) { $problems.Add("Arrays['$name'].Platform must be 'auto', 'FlashArray' or 'FlashBlade'.") }
-		$aTls = [string](Get-EvpProperty $a 'Tls')
-		if (-not $aTls) { $aTls = 'skip' }
-		if ($aTls -notmatch '^(skip|system|thumbprint:([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64}))$') { $problems.Add("Arrays['$name'].Tls must be 'skip', 'system' or 'thumbprint:<hex>'.") }
-		$endpoint = [string](Get-EvpProperty $a 'Endpoint')
-		if (-not $endpoint) { $problems.Add("Arrays['$name'] has no Endpoint.") }
-		$tokenFile = Resolve-EvpConfigPath -Value ([string](Get-EvpProperty $a 'ApiTokenFile')) -BaseDirectory $baseDir
-		if (-not $tokenFile) { $problems.Add("Arrays['$name'] has no ApiTokenFile.") }
-		$arrays[$name] = [ordered]@{
-			Name         = $name
-			Endpoint     = $endpoint
-			ApiTokenFile = $tokenFile
-			Platform     = $platform
-			Tls          = $aTls
-		}
+	$arraysFileSetting = [string](Get-EvpProperty $raw 'ArraysFile')
+	$arraysFile = if ($arraysFileSetting) { Resolve-EvpConfigPath -Value $arraysFileSetting -BaseDirectory $baseDir } else { Join-Path $baseDir 'arrays.jsonc' }
+	if (Test-Path -LiteralPath $arraysFile -PathType Leaf) {
+		try {
+			$rawArraysFile = Read-EvpJsonFile -Path $arraysFile
+			Add-EvpArrayConfig -Target $arrays -RawArrays (Get-EvpProperty $rawArraysFile 'Arrays') -BaseDirectory (Split-Path -Parent $arraysFile) -Origin $arraysFile -Problems $problems
+		} catch { $problems.Add($_.Exception.Message) }
+	} else {
+		if ($arraysFileSetting) { $problems.Add("ArraysFile '$arraysFile' was not found.") }
+		$arraysFile = $null
 	}
+	Add-EvpArrayConfig -Target $arrays -RawArrays (Get-EvpProperty $raw 'Arrays') -BaseDirectory $baseDir -Origin $fullPath -Problems $problems
+	if ($arrays.Count -eq 0) { $problems.Add("No arrays are defined. List them once in '$(Join-Path $baseDir 'arrays.jsonc')' (see arrays.sample.jsonc), or in Arrays in this file.") }
 
 	# --- Shares ------------------------------------------------------------------------------
+	# With Veeam.JobId the shares come from the job at run time and these entries only override
+	# Array or Source for one share. Without it they are the share list, as in 1.0.0.
 	$shares = [System.Collections.Generic.List[object]]::new()
 	$rawShares = @(Get-EvpProperty $raw 'Shares' | Where-Object { $null -ne $_ })
-	if ($rawShares.Count -eq 0) { $problems.Add('Shares must list at least one share.') }
+	if ($rawShares.Count -eq 0 -and -not $jobId) { $problems.Add('Shares must list at least one share, or set Veeam.JobId so the shares are read from the job.') }
 	$index = 0
 	$seenPaths = [System.Collections.Generic.HashSet[string]]::new([System.StringComparer]::OrdinalIgnoreCase)
 	foreach ($s in $rawShares) {
@@ -232,20 +227,12 @@ function Get-EvpConfig {
 		$protocol = Get-EvpShareProtocol -VeeamPath $veeamPath
 		if (-not $protocol) { $problems.Add("Shares[$index]: '$veeamPath' is neither an SMB path (\\server\share) nor an NFS path (server:/export)."); continue }
 		if (-not $seenPaths.Add((Get-EvpNormalizedSharePath -VeeamPath $veeamPath))) { $problems.Add("Shares: '$veeamPath' is listed more than once."); continue }
+		# Empty Array: mapped through the arrays' file interfaces at run time.
 		$arrayName = [string](Get-EvpProperty $s 'Array')
-		if (-not $arrayName) { $problems.Add("Shares[$index] ('$veeamPath') has no Array.") }
-		elseif (-not $arrays.Contains($arrayName)) { $problems.Add("Shares[$index] ('$veeamPath') references unknown array '$arrayName'.") }
+		if ($arrayName -and -not $arrays.Contains($arrayName)) { $problems.Add("Shares[$index] ('$veeamPath') references unknown array '$arrayName'.") }
 		$source = [string](Get-EvpProperty $s 'Source')
 		if (-not $source) { $source = 'auto' }
-		$parts = Split-EvpSharePath -VeeamPath $veeamPath
-		$shares.Add([ordered]@{
-				VeeamPath = $veeamPath
-				Protocol  = $protocol
-				Server    = $parts.Server
-				ShareName = $parts.ShareName
-				Array     = $arrayName
-				Source    = $source
-			})
+		$shares.Add((New-EvpShareRecord -VeeamPath $veeamPath -Array $arrayName -Source $source -Origin 'config'))
 	}
 
 	# --- Snapshot ----------------------------------------------------------------------------
@@ -299,6 +286,12 @@ function Get-EvpConfig {
 		RetentionDays = if ($null -ne $retention) { [int]$retention } else { 30 }
 	}
 
+	# --- State -------------------------------------------------------------------------------
+	$st = Get-EvpProperty $raw 'State'
+	$state = [ordered]@{
+		Directory = Resolve-EvpConfigPath -Value ([string](Get-EvpProperty $st 'Directory')) -BaseDirectory $baseDir
+	}
+
 	if ($problems.Count -gt 0) {
 		throw ("Configuration file '$fullPath' is invalid:`n  - " + ($problems -join "`n  - "))
 	}
@@ -307,12 +300,92 @@ function Get-EvpConfig {
 		ConfigPath      = $fullPath
 		ConfigDirectory = $baseDir
 		ProfileName     = $profileName
+		ArraysFile      = $arraysFile
 		Veeam           = $veeam
 		Arrays          = $arrays
 		Shares          = $shares
 		Snapshot        = $snapshot
 		Behaviour       = $behaviour
 		Logging         = $logging
+		State           = $state
+	}
+}
+
+function Add-EvpArrayConfig {
+	<#
+	.SYNOPSIS
+		Validates array entries and adds them to Target, keyed by name. Private helper.
+	.PARAMETER Origin
+		File the entries come from, named in messages and kept on each entry.
+	#>
+	param(
+		[Parameter(Mandatory)] [System.Collections.Specialized.OrderedDictionary] $Target,
+		$RawArrays,
+		[Parameter(Mandatory)] [string] $BaseDirectory,
+		[Parameter(Mandatory)] [string] $Origin,
+		[Parameter(Mandatory)] [AllowEmptyCollection()] [System.Collections.Generic.List[string]] $Problems
+	)
+	$index = 0
+	foreach ($a in @($RawArrays | Where-Object { $null -ne $_ })) {
+		$index++
+		$name = [string](Get-EvpProperty $a 'Name')
+		if (-not $name) { $Problems.Add("Arrays[$index] in '$Origin' has no Name."); continue }
+		if ($Target.Contains($name)) {
+			$where = if ($Target[$name].Origin -eq $Origin) { "more than once in '$Origin'" } else { "in both '$($Target[$name].Origin)' and '$Origin'" }
+			$Problems.Add("Arrays: the name '$name' is defined $where."); continue
+		}
+		$platform = [string](Get-EvpProperty $a 'Platform')
+		if (-not $platform) { $platform = 'auto' }
+		if ($platform -notin @('auto', 'FlashArray', 'FlashBlade')) { $Problems.Add("Arrays['$name'].Platform must be 'auto', 'FlashArray' or 'FlashBlade'.") }
+		$aTls = [string](Get-EvpProperty $a 'Tls')
+		if (-not $aTls) { $aTls = 'skip' }
+		if ($aTls -notmatch '^(skip|system|thumbprint:([0-9A-Fa-f]{40}|[0-9A-Fa-f]{64}))$') { $Problems.Add("Arrays['$name'].Tls must be 'skip', 'system' or 'thumbprint:<hex>'.") }
+		$endpoint = [string](Get-EvpProperty $a 'Endpoint')
+		if (-not $endpoint) { $Problems.Add("Arrays['$name'] has no Endpoint.") }
+		$tokenFile = Resolve-EvpConfigPath -Value ([string](Get-EvpProperty $a 'ApiTokenFile')) -BaseDirectory $BaseDirectory
+		if (-not $tokenFile) { $Problems.Add("Arrays['$name'] has no ApiTokenFile.") }
+		$Target[$name] = [ordered]@{
+			Name         = $name
+			Endpoint     = $endpoint
+			ApiTokenFile = $tokenFile
+			Platform     = $platform
+			Tls          = $aTls
+			Origin       = $Origin
+		}
+	}
+}
+
+function New-EvpShareRecord {
+	<#
+	.SYNOPSIS
+		The share record the orchestration works with, from a path and optional overrides.
+	.PARAMETER Array
+		Array name, or empty to map the share through the arrays' file interfaces.
+	.PARAMETER Origin
+		Where the share came from: 'config' (Shares), 'job' (the Veeam job's objects) or 'cache'.
+	#>
+	[Diagnostics.CodeAnalysis.SuppressMessageAttribute('PSUseShouldProcessForStateChangingFunctions', '',
+		Justification = 'Builds a record; changes nothing.')]
+	[CmdletBinding()]
+	[OutputType([System.Collections.Specialized.OrderedDictionary])]
+	param(
+		[Parameter(Mandatory)] [string] $VeeamPath,
+		[string] $Array,
+		[string] $Source = 'auto',
+		[string] $InventoryId,
+		[string] $Origin = 'config'
+	)
+	$parts = Split-EvpSharePath -VeeamPath $VeeamPath
+	return [ordered]@{
+		VeeamPath   = $VeeamPath
+		Protocol    = $parts.Protocol
+		Server      = $parts.Server
+		ShareName   = $parts.ShareName
+		Array       = $Array
+		Source      = if ($Source) { $Source } else { 'auto' }
+		InventoryId = $InventoryId
+		Origin      = $Origin
+		ServerHint  = $null
 	}
 }
 

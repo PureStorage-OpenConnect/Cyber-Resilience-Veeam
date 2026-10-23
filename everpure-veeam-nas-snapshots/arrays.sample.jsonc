@@ -1,0 +1,25 @@
+// Sample arrays file for Invoke-EverpureVeeamNasSnapshot.ps1. One file for all jobs.
+//
+// New-EverpureVeeamJobScripts.ps1 copies it to jobs/arrays.jsonc the first time it runs. List
+// every FlashArray and FlashBlade whose shares any Veeam job backs up; the scripts work out which
+// array serves which share from the arrays' file interfaces, so nothing here names a share.
+// The list starts empty, so a job configuration from 1.0.0 with its own Arrays keeps working
+// unchanged beside it. Relative paths resolve against this file's directory.
+//
+// NEVER put a token in this file. Point at files written by Protect-EverpureVeeamSecret.ps1
+// (.\Protect-EverpureVeeamSecret.ps1 -Path .\jobs\secrets\fa01.token -Endpoint fa01.example.com -Verify).
+// // and /* */ comments are allowed; '#' is not.
+//
+// Per array:
+//   Name          used in logs, in the state file and in Shares[].Array overrides
+//   Endpoint      management address
+//   ApiTokenFile  file written by Protect-EverpureVeeamSecret.ps1
+//   Platform      "auto" (default) detects FlashArray vs FlashBlade
+//   Tls           "skip" (default; both ship self-signed certificates), "system" (trust store) or
+//                 "thumbprint:<SHA-1 or SHA-256 hex>" (Protect-EverpureVeeamSecret.ps1 -VerifyOnly prints it)
+{
+	"Arrays": [
+		// { "Name": "fa01", "Endpoint": "fa01.example.com", "ApiTokenFile": "secrets/fa01.token", "Platform": "auto", "Tls": "skip" },
+		// { "Name": "fb01", "Endpoint": "fb01.example.com", "ApiTokenFile": "secrets/fb01.token", "Platform": "auto", "Tls": "skip" }
+	]
+}

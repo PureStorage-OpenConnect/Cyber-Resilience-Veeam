@@ -1,9 +1,11 @@
 # Everpure NAS backup from snapshot for Veeam Backup & Replication 13.1
 
-One PowerShell 7 code base that lets a Veeam file backup job read FlashArray File and
-FlashBlade shares (SMB and NFS) from storage snapshots instead of the live share. It runs
-unchanged on a Windows backup server and on the Veeam Software Appliance, needs no array SDK
-module, and keeps every setting in one configuration file per job.
+One PowerShell 7 code base that lets a Veeam file backup job or file-to-tape job read
+FlashArray File and FlashBlade shares (SMB and NFS) from storage snapshots instead of the live
+share. It runs unchanged on a Windows backup server and on the Veeam Software Appliance, needs no
+array SDK module, and needs very little configuration: the arrays are listed once, and a job's
+configuration names only the job. Its shares, the array behind each share and the managed
+directory or file system to snapshot are worked out at run time.
 
 > **Disclaimer.** These are community example scripts. They are provided as is and are not
 > supported by Everpure or by the author. Read them, test them in a lab, and adapt them to your
@@ -11,21 +13,38 @@ module, and keeps every setting in one configuration file per job.
 
 ## How it works
 
-A Veeam file backup job runs the **pre** phase before it starts and the **post** phase after
-it finishes.
+A Veeam file backup or file-to-tape job runs the **pre** phase before it starts and the
+**post** phase after it finishes.
 
 ```
 pre   0. job guard: a session of the bound job (Veeam.JobId) must be running, else stop
-      1. open Veeam, resolve every share of the job in the inventory (a miss stops here)
-      2. log in to every array, map each share to its managed directory / file system
+      1. open Veeam, read the job's shares, resolve each in the inventory (a miss stops here)
+      2. map each share to the array that owns its address, then to its managed directory /
+         file system
       3. create ONE snapshot per source, tagged and timestamped
       4. point every share at <share>/.snapshot/<name>, failover off, mode StorageSnapshot
-      5. sweep snapshots with the tag older than Snapshot.KeepFor (all earlier ones by default)
+      5. sweep snapshots with the tag older than Snapshot.KeepFor (all earlier ones by default),
+         also on sources of shares that have left the job; save the state of the run
       on failure after step 1: point every share at a non-existent sentinel path (fail-safe)
 post  job guard, point every share at a non-existent path (disarm), then destroy the
       snapshots with the tag older than Snapshot.KeepFor (optional, highly recommended)
-verify check secrets, Veeam, the bound job and its shares, arrays and sources; change nothing
+verify check secrets, Veeam, the bound job and its shares, the mapping to arrays and sources;
+      change nothing
 ```
+
+**Shares, arrays and the state file.** With `Veeam.JobId` set, the job's objects are the share
+list. A sub-folder or single-file object belongs to its share, and an object that is no SMB share
+or NFS export (an S3 bucket, a Windows server path) is reported and backed up as Veeam reads it.
+Each share's host (an IP address, or a name resolved through DNS) is matched against the file
+interfaces of the arrays in `arrays.jsonc`: on FlashArray the enabled interfaces with the `file`
+service, on FlashBlade those with the `data` service. The array that owns the address serves the
+share. `Shares` entries in the job configuration are only needed to override that for one share
+(`Array`, `Source`). After each run the scripts save `<profile>.state.json`, so the next run asks
+the arrays that served the shares last time first. If a share leaves the job, they keep cleaning
+up the tagged snapshots on its source until none is left. An array that cannot be reached is a
+warning while every share still maps to another array, and an error when a share has no array
+left. Without `Veeam.JobId`, or with the REST backend, which cannot list job objects, `Shares` is
+the share list as in 1.0.0.
 
 **Why the fail-safe.** Veeam only warns when a pre-job script fails and runs the job anyway.
 Without the sentinel a failed run would leave the shares pointing at the previous snapshot or
@@ -63,10 +82,10 @@ job inherits the script command lines and would repoint this job's shares and de
 snapshots. With `Veeam.JobId` set, which the generator fills in, the pre and post phases first
 check that a session of exactly that job is active. That is always the case when Veeam itself
 runs the script, and never when a clone or another job does, so the phase stops before
-changing anything. The verify phase also compares the job's shares with the `Shares` list and
-reports any share the job would back up live. A `-WhatIf` dry run only warns. For a manual run
-outside a job session add `-NoJobGuard`. The guard cannot tell a clone apart from the original
-while both run at the same time.
+changing anything. File backup jobs and file-to-tape jobs are both recognised. A `-WhatIf` dry
+run only warns. For a manual run outside a job session add `-NoJobGuard`; the job is still read
+for its shares. The guard cannot tell a clone apart from the original while both run at the
+same time.
 
 ### Retries and cancelled jobs
 
@@ -106,9 +125,11 @@ are detected automatically.
 | File | Purpose |
 | --- | --- |
 | `Invoke-EverpureVeeamNasSnapshot.ps1` | Entry point: `-Phase pre\|post\|verify -ConfigFile <file> [-WhatIf] [-NoJobGuard]` |
-| `EverpureVeeamNas.psd1`, `EverpureVeeamNas.psm1` + `lib/` | Module: manifest with the version, then configuration, secrets, logging, HTTP, Veeam adapter (PowerShell and REST backends), Purity client (FlashArray and FlashBlade), orchestration |
-| `config.sample.jsonc` | Annotated configuration; copy one per job |
-| `New-EverpureVeeamJobScripts.ps1` | Writes `jobs/<job>.jsonc` and the `<job>-pre.ps1` / `<job>-post.ps1` wrappers |
+| `EverpureVeeamNas.psd1`, `EverpureVeeamNas.psm1` + `lib/` | Module: manifest with the version, then configuration, secrets, logging, HTTP, Veeam adapter (PowerShell and REST backends), Purity client (FlashArray and FlashBlade), discovery (shares, mapping, state), orchestration |
+| `arrays.sample.jsonc` | Annotated arrays file; the generator copies it to `jobs/arrays.jsonc` once, for all jobs |
+| `config.sample.jsonc` | Annotated job configuration; the generator writes one per job |
+| `New-EverpureVeeamJobScripts.ps1` | Writes `jobs/<job>.jsonc`, the `<job>-pre.ps1` / `<job>-post.ps1` wrappers and, the first time, `jobs/arrays.jsonc` |
+| `state/` (created at run time) | `<job>.state.json` per job: the shares, arrays and sources of the last run. No secrets; deleting it is harmless |
 | `Protect-EverpureVeeamSecret.ps1` | Stores an API token or the Veeam password in a protected file and verifies it |
 | `tests/` | Test suite, runs anywhere: `pwsh -NoProfile -File tests/Invoke-Tests.ps1` |
 | `CHANGELOG.md` | What changed in each release |
@@ -118,20 +139,21 @@ are detected automatically.
 1. Install PowerShell 7 if needed. Copy this folder to the backup server, for example
    `C:\01_SCRIPTS\everpure-veeam-nas`.
 2. Create the job files with `.\New-EverpureVeeamJobScripts.ps1 -Job <job>`. On the backup
-   server it looks the job up and writes its ID to `Veeam.JobId`; elsewhere pass `-JobId`. Edit
-   `jobs\<job>.jsonc` so it lists every array and every share exactly as the Veeam inventory
-   shows it (`\\server\share` or `server:/export`). A sub-folder or single-file job object
-   still belongs to its share; list the share.
-3. Store each array's API token and verify it from an **elevated** PowerShell (Run as
+   server it looks the file backup or file-to-tape job up and writes its ID to `Veeam.JobId`;
+   elsewhere pass `-JobId`. The job configuration needs no editing. The first time, also list
+   every FlashArray and FlashBlade in `jobs\arrays.jsonc` (name, management endpoint, token
+   file). That file serves every job in the folder, and nothing in it names a share.
+3. Store each array's API token once and verify it from an **elevated** PowerShell (Run as
    administrator) with
    `.\Protect-EverpureVeeamSecret.ps1 -Path .\jobs\secrets\<array>.token -Endpoint <array> -Verify`.
    The helper creates the file with an ACL for SYSTEM and Administrators only. In a non-elevated
    session UAC filters your Administrators membership, so you could write the file but not read
    it back; the helper therefore refuses such a session before it asks for the secret and writes
    nothing. The token needs the `storage_admin` role (create and destroy snapshots, read
-   exports).
+   exports and network interfaces).
 4. Run `pwsh -NoProfile -File .\Invoke-EverpureVeeamNasSnapshot.ps1 -Phase verify -ConfigFile .\jobs\<job>.jsonc`
-   and fix whatever it reports. Repeat under the Veeam service account to prove it can read the
+   and fix whatever it reports. It lists every share of the job with the array and source it
+   maps to. Repeat under the Veeam service account to prove it can read the
    secrets with `psexec -s pwsh -NoProfile -File ... -Phase verify ...`.
 5. Dry run with `-Phase pre -ConfigFile ... -WhatIf`, which prints every snapshot it would create
    and every share it would repoint.
@@ -145,7 +167,8 @@ are detected automatically.
 Only once Veeam ships the REST fix. Then generate the job files on a workstation, upload the
 folder to `/var/lib/veeam/scripts` through the console's Files node, store the tokens with
 `Protect-EverpureVeeamSecret.ps1` over SSH (mode 0640, group `veeam-grp-data`), set
-`Veeam.Server` to the appliance FQDN and `Veeam.User`/`Veeam.PasswordFile`, and select
+`Veeam.Server` to the appliance FQDN and `Veeam.User`/`Veeam.PasswordFile`, list the shares in
+`Shares` (the REST backend cannot read them from the job), and select
 `jobs/<job>-pre.ps1` and `jobs/<job>-post.ps1` in the job dialog. Root is not needed for the
 verification there. The account that writes the file owns it and mode 0640 lets the owner read
 it back. Only the `chgrp veeam-grp-data` step needs root or membership in that group; the helper

@@ -323,11 +323,12 @@ Reset-Logs
 $rc = Invoke-EvpPrePhase -Config $stale -Platform $platform 6>$null 3>$null
 Assert-Equal 'unknown job id: exit 2' $rc 2
 Assert-Equal 'unknown job id: nothing touched' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 0
-# Verify compares the job's shares with Shares.
+# The job is the share list: a job share missing from Shares (1.0.0 reported it) is covered.
 $env:EVP_TEST_JOBS = ConvertTo-Json -Compress -Depth 4 -InputObject @(@{ Id = $jobId; Name = 'lab-job'; ShareRoots = $labRoots + '192.0.2.10:/finance-nfs' })
 $state = New-LabState; Use-LabMock $state; Reset-Logs
 $rc = Invoke-EvpVerifyPhase -Config $bound -Platform $platform 6>$null 3>$null
-Assert-Equal 'verify flags a job share missing from Shares (exit 1, config)' $rc 1
+Assert-Equal 'verify covers a job share missing from Shares (1.1.0)' $rc 0
+Assert-True 'its source was resolved through the interface mapping' (((Get-HttpCalls).Uri -join ' ') -match 'directory-exports\?export_names=finance-nfs')
 $env:EVP_TEST_JOBS = ConvertTo-Json -Compress -Depth 4 -InputObject @(@{ Id = $jobId; Name = 'lab-job'; ShareRoots = $labRoots })
 $rc = Invoke-EvpVerifyPhase -Config $bound -Platform $platform 6>$null 3>$null
 Assert-Equal 'verify passes when job and Shares agree' $rc 0
@@ -350,6 +351,143 @@ Assert-Equal 'REST: pre runs inside the session' $rc 0
 Assert-True 'REST: sessions filtered by job id' (@(Get-HttpCalls | Where-Object Uri -like "*sessions?jobIdFilter=$jobId*").Count -ge 1)
 $rc = Invoke-EvpVerifyPhase -Config $restBound -Platform $platform 6>$null 3>$null
 Assert-Equal 'REST: verify passes (no object comparison)' $rc 0
+
+# ---------------------------------------------------------------------------------------------
+function Invoke-Captured([scriptblock] $ScriptBlock) {
+	<# Runs a phase, returning its exit code and everything it wrote to the host as text. #>
+	$all = @(& $ScriptBlock 6>&1 3>&1)
+	[pscustomobject]@{ Code = ($all | Where-Object { $_ -is [int] } | Select-Object -Last 1); Text = (($all | Where-Object { $_ -isnot [int] } | ForEach-Object { "$_" }) -join "`n") }
+}
+function Write-StateFile([string] $Directory, [string] $ProfileName, $Document) {
+	Write-TestFile -Path (Join-Path $Directory "state/$ProfileName.state.json") -Content ($Document | ConvertTo-Json -Depth 6)
+}
+
+Write-TestSection 'Discovery: file interfaces and host addresses'
+$state = New-LabState; Use-LabMock $state; Reset-Logs
+$fa = Connect-EvpArray -ArrayConfig $faConfig -ApiToken (Get-Token 'fa-token') 6>$null
+$fb = Connect-EvpArray -ArrayConfig $fbConfig -ApiToken (Get-Token 'fb-token') 6>$null
+Assert-Equal 'FA: only enabled interfaces with service file' ((@(Get-EvpArrayFileInterfaces -Session $fa) | ForEach-Object Address) -join ',') '192.0.2.10'
+Assert-Equal 'FB: data interfaces with their server' ((@(Get-EvpArrayFileInterfaces -Session $fb) | ForEach-Object { "$($_.Address)@$($_.Server)" }) -join ',') '192.0.2.20@srv1,192.0.2.21@srv2'
+Assert-Equal 'IP literal used as is' (Resolve-EvpShareHostAddress -HostName '192.0.2.10') '192.0.2.10'
+Assert-True  'a name is resolved by DNS' (@(Resolve-EvpShareHostAddress -HostName 'localhost').Count -ge 1)
+Assert-Equal 'an unresolvable name has no address' @(Resolve-EvpShareHostAddress -HostName 'no-such-host.invalid' 3>$null).Count 0
+
+Write-TestSection 'Discovery: mapping shares to arrays'
+$discDir = Join-Path $tmp 'disc'
+$discCfg = Get-EvpConfig -Path (New-LabConfigFile -Directory $discDir -Overrides @{ Shares = @(
+			@{ VeeamPath = '\\192.0.2.10\finance-smb' }, @{ VeeamPath = '192.0.2.10:/shared' }, @{ VeeamPath = '192.0.2.20:/projects-nfs' }) })
+$state = New-LabState; Use-LabMock $state; Reset-Logs
+$plan = Connect-EvpArraysForShares -Config $discCfg -Platform $platform -Shares (Get-EvpRunShares -Config $discCfg -Job $null) 6>$null 3>$null
+Assert-Equal 'every share mapped' @($plan.Shares).Count 3
+Assert-Equal 'SMB on the FlashArray VIP -> fa' (@($plan.Shares) | Where-Object VeeamPath -eq '\\192.0.2.10\finance-smb').Array 'fa'
+Assert-Equal 'NFS on the FlashBlade VIP -> fb' (@($plan.Shares) | Where-Object VeeamPath -eq '192.0.2.20:/projects-nfs').Array 'fb'
+Assert-Equal 'sources resolved' (($plan.Groups.Keys | Sort-Object) -join ',') 'fa|fs01:finance-smb,fa|fs01:shared,fb|projects-nfs'
+Assert-Equal 'the loaded configuration is not annotated' $discCfg.Shares[0].Array ''
+$dup = @(New-EvpShareRecord -VeeamPath '\\192.0.2.21\dup-share')
+$plan = Connect-EvpArraysForShares -Config $discCfg -Platform $platform -Shares $dup 6>$null 3>$null
+Assert-Equal 'FB export on two servers settled by the server of the VIP' $plan.Groups.Values[0].SourceName 'fs-b'
+$stray = @((New-EvpShareRecord -VeeamPath '\\192.0.2.10\finance-smb'), (New-EvpShareRecord -VeeamPath '\\192.0.2.99\old'))
+Assert-Throws 'an address no array owns is an error (disabled interface ignored)' { Connect-EvpArraysForShares -Config $discCfg -Platform $platform -Shares $stray 6>$null 3>$null } 'no configured array has a file interface with address 192\.0\.2\.99'
+$plan = Connect-EvpArraysForShares -Config $discCfg -Platform $platform -Shares $stray -Tolerant 6>$null 3>$null
+Assert-Equal 'tolerant: the other share still maps' @($plan.Shares).Count 1
+Assert-Equal 'tolerant: the stray share is reported' @($plan.Unmapped).Count 1
+$state = New-LabState; $state.FbExtraAddress = '192.0.2.10'; Use-LabMock $state
+Assert-Throws 'an address owned by two arrays is an error' { Connect-EvpArraysForShares -Config $discCfg -Platform $platform -Shares @(New-EvpShareRecord -VeeamPath '\\192.0.2.10\finance-smb') 6>$null 3>$null } 'file interface of 2 arrays \(fa, fb\)'
+$pinned = @(New-EvpShareRecord -VeeamPath '\\192.0.2.10\finance-smb' -Array 'fa')
+Assert-Equal 'an Array override settles it' @((Connect-EvpArraysForShares -Config $discCfg -Platform $platform -Shares $pinned 6>$null 3>$null).Shares).Count 1
+# The cache names the array: nothing else is contacted.
+$state = New-LabState; Use-LabMock $state; Reset-Logs
+$cached = [pscustomobject]@{ Version = 1; Shares = @([pscustomobject]@{ VeeamPath = '\\192.0.2.10\finance-smb'; Array = 'fa' }); Sources = @() }
+$plan = Connect-EvpArraysForShares -Config $discCfg -Platform $platform -Shares @(New-EvpShareRecord -VeeamPath '\\192.0.2.10\finance-smb') -State $cached 6>$null 3>$null
+Assert-Equal 'cache-first: mapped' @($plan.Shares).Count 1
+Assert-Equal 'cache-first: the FlashBlade was not contacted' @(Get-HttpCalls | Where-Object Uri -like 'https://fb/*').Count 0
+# An array that is down only matters when a share needs it.
+[System.IO.File]::WriteAllText((Join-Path $discDir 'secrets/fb.token'), "wrong`n")
+$down = Get-EvpConfig -Path (Join-Path $discDir 'lab-job.jsonc')
+$plan = Connect-EvpArraysForShares -Config $down -Platform $platform -Shares @(New-EvpShareRecord -VeeamPath '\\192.0.2.10\finance-smb') 6>$null 3>$null
+Assert-Equal 'unreachable array not needed: share mapped' @($plan.Shares).Count 1
+Assert-True  'unreachable array not needed: recorded' $plan.Unreachable.Contains('fb')
+Assert-Throws 'unreachable array needed: named in the error' { Connect-EvpArraysForShares -Config $down -Platform $platform -Shares @(New-EvpShareRecord -VeeamPath '192.0.2.20:/projects-nfs') 6>$null 3>$null } 'not reachable: fb'
+[System.IO.File]::WriteAllText((Join-Path $discDir 'secrets/fb.token'), "fb-token`n")
+
+Write-TestSection 'Discovery: pre and post with the shares from the job and a global arrays file'
+$discJobId = 'abababab-7777-4777-8777-000000000007'
+$jobDir = Join-Path $tmp 'disc-job'
+$jobCfgPath = New-LabConfigFile -Directory $jobDir -Name 'files' -Overrides @{ Veeam = @{ JobId = $discJobId }; Arrays = @(); Shares = @(); Snapshot = @{ KeepFor = 'none' } }
+$null = Write-TestFile -Path (Join-Path $jobDir 'arrays.jsonc') -Content '{ "Arrays": [ { "Name": "fa", "Endpoint": "fa", "ApiTokenFile": "secrets/fa.token" }, { "Name": "fb", "Endpoint": "fb", "ApiTokenFile": "secrets/fb.token" } ] }'
+$jobCfg = Get-EvpConfig -Path $jobCfgPath
+Assert-Equal 'job config: arrays from arrays.jsonc' $jobCfg.Arrays.Count 2
+$discRoots = @('\\192.0.2.10\finance-smb', '\\192.0.2.10\shared', '192.0.2.10:/shared', '192.0.2.20:/projects-nfs')
+$env:EVP_TEST_JOBS = ConvertTo-Json -Compress -Depth 4 -InputObject @(@{ Id = $discJobId; Name = 'files'; ShareRoots = $discRoots + 'bucket-01' })
+$env:EVP_TEST_SESSIONS = ConvertTo-Json -Compress -InputObject @(@{ Id = 'abababab-8888-4888-8888-000000000008'; JobId = $discJobId; Name = 'files'; State = 'Working' })
+$state = New-LabState; Use-LabMock $state; Reset-Logs
+$r = Invoke-Captured { Invoke-EvpPrePhase -Config $jobCfg -Platform $platform }
+Assert-Equal 'pre exit 0' $r.Code 0
+Assert-Equal 'the four job shares repointed' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 4
+Assert-True  'a non-share job object is reported' ($r.Text -match "Job object 'bucket-01' is not an SMB share or NFS export")
+$statePath = Join-Path $jobDir 'state/files.state.json'
+Assert-True  'state written' (Test-Path $statePath)
+$saved = Get-Content $statePath -Raw | ConvertFrom-Json
+Assert-Equal 'state: shares' @($saved.Shares).Count 4
+Assert-Equal 'state: sources' (($saved.Sources | ForEach-Object { "$($_.Array)|$($_.Source)" } | Sort-Object) -join ',') 'fa|fs01:finance-smb,fa|fs01:shared,fb|projects-nfs'
+Assert-True  'state: inventory IDs from the job' (-not (@($saved.Shares) | Where-Object { -not $_.InventoryId }))
+Assert-Equal 'state: job name' $saved.JobName 'files'
+Reset-Logs
+$r = Invoke-Captured { Invoke-EvpPrePhase -Config $jobCfg -Platform $platform }
+Assert-Equal 'second pre exit 0' $r.Code 0
+Assert-True  'second pre maps from the state' ($r.Text -match 'as in the last run')
+Reset-Logs
+$rc = Invoke-EvpPostPhase -Config $jobCfg -Platform $platform 6>$null 3>$null
+Assert-Equal 'post exit 0' $rc 0
+Assert-Equal 'post disarms the four job shares' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 4
+# The FlashBlade share leaves the job; an old tagged snapshot is still on its file system.
+$env:EVP_TEST_JOBS = ConvertTo-Json -Compress -Depth 4 -InputObject @(@{ Id = $discJobId; Name = 'files'; ShareRoots = $discRoots[0..2] })
+$state.FbSnapshots += , @{ name = 'projects-nfs.Veeam-Backup-20200101T000000Z'; source = @{ name = 'projects-nfs' }; destroyed = $false; created = 0 }
+Reset-Logs
+$r = Invoke-Captured { Invoke-EvpPostPhase -Config $jobCfg -Platform $platform }
+Assert-Equal 'post after a share left the job: exit 0' $r.Code 0
+Assert-True  'its source is cleaned up from the state' ($r.Text -match "'projects-nfs' is no longer used by the job")
+Assert-Equal 'the old snapshot on the orphaned source destroyed' @(Get-HttpCalls | Where-Object { $_.Method -eq 'PATCH' -and $_.Uri -like '*projects-nfs.Veeam-Backup-20200101T000000Z' }).Count 1
+$saved = Get-Content $statePath -Raw | ConvertFrom-Json
+Assert-Equal 'nothing tagged left there: dropped from the state' (($saved.Sources | ForEach-Object { $_.Source } | Sort-Object) -join ',') 'fs01:finance-smb,fs01:shared'
+# Verify shows where every share comes from and passes.
+$r = Invoke-Captured { Invoke-EvpVerifyPhase -Config $jobCfg -Platform $platform }
+Assert-Equal 'verify with discovery passes' $r.Code 0
+Assert-True  'verify lists the job shares' ($r.Text -match 'share \\\\192\.0\.2\.10\\finance-smb \[SMB\] from the job')
+# -NoJobGuard: no session needed, the job is still read for its shares.
+$env:EVP_TEST_SESSIONS = $null
+$noGuard = Get-EvpConfig -Path $jobCfgPath
+$noGuard.Veeam.JobGuard = $false
+Reset-Logs
+$rc = Invoke-EvpPrePhase -Config $noGuard -Platform $platform 6>$null 3>$null
+Assert-Equal '-NoJobGuard: pre runs without a session' $rc 0
+Assert-Equal '-NoJobGuard: still the job shares' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 3
+$rc = Invoke-EvpPrePhase -Config $jobCfg -Platform $platform 6>$null 3>$null
+Assert-Equal 'with the guard and no session: refused' $rc 2
+
+Write-TestSection 'File-to-tape job'
+$tapeId = 'cdcdcdcd-9999-4999-8999-000000000009'
+$tapeRoots = @('\\192.0.2.20\projects-smb', '192.0.2.20:/projects-nfs')
+$env:EVP_TEST_JOBS = ConvertTo-Json -Compress -Depth 4 -InputObject @(@{ Id = $tapeId; Name = 'to-tape'; Kind = 'FileToTape'; ShareRoots = $tapeRoots })
+$tapeCfg = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'tape') -Name 'to-tape' -Overrides @{ Veeam = @{ JobId = $tapeId }; Shares = @() })
+$state = New-LabState; Use-LabMock $state; Reset-Logs
+$session = Connect-EvpVeeam -Config $tapeCfg -Platform $platform 6>$null 3>$null
+$tapeJob = Get-EvpVeeamJob -Session $session -JobId $tapeId
+Assert-Equal 'tape: found as file-to-tape' $tapeJob.Kind 'FileToTape'
+Assert-Equal 'tape: share paths without the nfs41:// prefix' ($tapeJob.ShareRoots -join ',') ($tapeRoots -join ',')
+Assert-True  'tape: inventory IDs' (-not ($tapeJob.Shares | Where-Object { -not $_.InventoryId }))
+Assert-Equal 'tape: found by name' (@(Find-EvpVeeamJobByName -Name 'to-tape') | ForEach-Object { "$($_.Kind):$($_.Id)" }) "FileToTape:$tapeId"
+$rc = Invoke-EvpPrePhase -Config $tapeCfg -Platform $platform 6>$null 3>$null
+Assert-Equal 'tape: pre refused without a tape session' $rc 2
+$env:EVP_TEST_SESSIONS = ConvertTo-Json -Compress -InputObject @(@{ Id = 'cdcdcdcd-aaaa-4aaa-8aaa-00000000000a'; JobId = $tapeId; Name = 'to-tape'; State = 'Working' })
+Reset-Logs
+$rc = Invoke-EvpPrePhase -Config $tapeCfg -Platform $platform 6>$null 3>$null
+Assert-Equal 'tape: pre runs inside the tape session' $rc 0
+Assert-Equal 'tape: both shares repointed' @(Get-VeeamCalls | Where-Object Cmdlet -like 'Set-*').Count 2
+Reset-Logs
+$rc = Invoke-EvpPostPhase -Config $tapeCfg -Platform $platform 6>$null 3>$null
+Assert-Equal 'tape: post exit 0' $rc 0
+$env:EVP_TEST_JOBS = $null; $env:EVP_TEST_SESSIONS = $null
 
 # ---------------------------------------------------------------------------------------------
 Write-TestSection 'Post phase'

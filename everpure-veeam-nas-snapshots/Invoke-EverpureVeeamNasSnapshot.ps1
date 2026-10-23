@@ -105,8 +105,8 @@ try {
 	Write-Host ''
 	Write-EvpPlan -Config $config -Platform $platform -Phase $Phase -DryRun:$WhatIfPreference
 	if ($NoJobGuard -and $config.Veeam.JobId) {
-		Write-Host 'Job guard          : DISABLED for this run (-NoJobGuard)'
-		$config.Veeam.JobId = ''
+		Write-Host 'Job guard          : DISABLED for this run (-NoJobGuard); the job is still read for its shares'
+		$config.Veeam.JobGuard = $false
 	}
 
 	switch ($Phase) {

@@ -116,10 +116,48 @@ Assert-Equal 'ensure mode default' $c.Behaviour.EnsureProcessingMode 'True'
 Assert-Equal 'log retention default' $c.Logging.RetentionDays 30
 Assert-Equal 'log dir default null' ($null -eq $c.Logging.Directory) 'True'
 
-Write-TestSection 'Get-EvpConfig: sample file loads'
-$sample = Get-EvpConfig -Path (Join-Path $projectRoot 'config.sample.jsonc')
-Assert-Equal 'sample shares' $sample.Shares.Count 4
-Assert-Equal 'sample arrays' $sample.Arrays.Count 2
+Write-TestSection 'Get-EvpConfig: sample files load'
+# As the generator writes them: the job's ID filled in, the arrays sample as jobs/arrays.jsonc.
+$sampleDir = Join-Path $tmp 'sample-jobs'
+$sampleText = (Get-Content (Join-Path $projectRoot 'config.sample.jsonc') -Raw).Replace('"JobId": ""', '"JobId": "aaaaaaaa-1111-4111-8111-000000000001"')
+$arraysSample = Get-Content (Join-Path $projectRoot 'arrays.sample.jsonc') -Raw
+$null = Write-TestFile -Path (Join-Path $sampleDir 'arrays.jsonc') -Content $arraysSample
+Assert-Throws 'sample: a fresh arrays file asks for arrays' { Get-EvpConfig -Path (Write-TestFile -Path (Join-Path $sampleDir 'files.jsonc') -Content $sampleText) } 'No arrays are defined'
+# The admin's edit: the commented examples switched on.
+$null = Write-TestFile -Path (Join-Path $sampleDir 'arrays.jsonc') -Content ($arraysSample -replace '(?m)^(\s*)// (\{ "Name")', '$1$2')
+$sample = Get-EvpConfig -Path (Join-Path $sampleDir 'files.jsonc')
+Assert-Equal 'sample: no shares, they come from the job' $sample.Shares.Count 0
+Assert-Equal 'sample: arrays from the arrays file' $sample.Arrays.Count 2
+Assert-Equal 'sample: arrays file found beside the job file' $sample.ArraysFile (Join-Path $sampleDir 'arrays.jsonc')
+Assert-Equal 'sample: token path relative to the arrays file' $sample.Arrays['fa01'].ApiTokenFile (Join-Path $sampleDir 'secrets/fa01.token')
+Assert-Throws 'sample without a job ID needs Shares' { Get-EvpConfig -Path (Write-TestFile -Path (Join-Path $sampleDir 'unbound.jsonc') -Content (Get-Content (Join-Path $projectRoot 'config.sample.jsonc') -Raw)) } 'or set Veeam.JobId'
+# A 1.0.0 job file with its own arrays next to a fresh arrays file: unchanged.
+$legacy = Write-TestFile -Path (Join-Path $tmp 'legacy-jobs/old.jsonc') -Content '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }'
+$null = Write-TestFile -Path (Join-Path $tmp 'legacy-jobs/arrays.jsonc') -Content $arraysSample
+Assert-Equal '1.0.0 job file beside a fresh arrays file: only its own arrays' ((Get-EvpConfig -Path $legacy).Arrays.Keys -join ',') 'fa'
+
+Write-TestSection 'Get-EvpConfig: arrays file'
+$afDir = Join-Path $tmp 'arrays-file'
+$null = Write-TestFile -Path (Join-Path $afDir 'shared/arrays.jsonc') -Content '{ "Arrays": [ { "Name": "fa", "Endpoint": "fa.example.com", "ApiTokenFile": "secrets/fa.token" } ] }'
+$job = Write-TestFile -Path (Join-Path $afDir 'jobs/a.jsonc') -Content '{ "ArraysFile": "../shared/arrays.jsonc", "Veeam": { "JobId": "aaaaaaaa-1111-4111-8111-000000000001" }, "Arrays": [ { "Name": "fb", "Endpoint": "fb.example.com", "ApiTokenFile": "fb.token" } ] }'
+$c = Get-EvpConfig -Path $job
+Assert-Equal 'arrays merged from both files' (($c.Arrays.Keys | Sort-Object) -join ',') 'fa,fb'
+Assert-Equal 'explicit ArraysFile resolved' $c.ArraysFile (Join-Path $afDir 'shared/arrays.jsonc')
+Assert-Equal 'arrays-file token beside the arrays file' $c.Arrays['fa'].ApiTokenFile (Join-Path $afDir 'shared/secrets/fa.token')
+Assert-Equal 'inline token beside the job file' $c.Arrays['fb'].ApiTokenFile (Join-Path $afDir 'jobs/fb.token')
+Assert-Equal 'origin kept' $c.Arrays['fa'].Origin (Join-Path $afDir 'shared/arrays.jsonc')
+Assert-Equal 'job guard on with a job id' $c.Veeam.JobGuard 'True'
+Assert-Equal 'state directory default null' ($null -eq $c.State.Directory) 'True'
+$clash = Write-TestFile -Path (Join-Path $afDir 'jobs/b.jsonc') -Content '{ "ArraysFile": "../shared/arrays.jsonc", "Veeam": { "JobId": "aaaaaaaa-1111-4111-8111-000000000001" }, "Arrays": [ { "Name": "fa", "Endpoint": "other", "ApiTokenFile": "t" } ] }'
+Assert-Throws 'a name in both files is an error' { Get-EvpConfig -Path $clash } "defined in both"
+$missingFile = Write-TestFile -Path (Join-Path $afDir 'jobs/c.jsonc') -Content '{ "ArraysFile": "nope.jsonc", "Veeam": { "JobId": "aaaaaaaa-1111-4111-8111-000000000001" } }'
+Assert-Throws 'explicit ArraysFile must exist' { Get-EvpConfig -Path $missingFile } "ArraysFile .* was not found"
+$override = Write-TestFile -Path (Join-Path $afDir 'shared/d.jsonc') -Content '{ "Veeam": { "JobId": "aaaaaaaa-1111-4111-8111-000000000001" }, "Shares": [ { "VeeamPath": "\\\\srv\\share", "Source": "fs:dir" } ], "State": { "Directory": "st" } }'
+$c = Get-EvpConfig -Path $override
+Assert-Equal 'default arrays.jsonc beside the job file' $c.Arrays['fa'].Endpoint 'fa.example.com'
+Assert-Equal 'override without Array: mapped at run time' $c.Shares[0].Array ''
+Assert-Equal 'override source kept' $c.Shares[0].Source 'fs:dir'
+Assert-Equal 'state directory resolved' $c.State.Directory (Join-Path $afDir 'shared/st')
 
 Write-TestSection 'Get-EvpConfig: validation'
 function Test-ConfigError([string] $Name, [string] $Json, [string] $Pattern) {
@@ -128,9 +166,9 @@ function Test-ConfigError([string] $Name, [string] $Json, [string] $Pattern) {
 }
 Assert-Throws 'missing file' { Get-EvpConfig -Path (Join-Path $tmp 'nope.jsonc') } 'was not found'
 Test-ConfigError 'not json' '{ this is not json' 'could not be read as JSON'
-Test-ConfigError 'no arrays'  '{ "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'Arrays must list at least one'
-Test-ConfigError 'no shares'  '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ] }' 'Shares must list at least one'
-Test-ConfigError 'duplicate array' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" }, { "Name": "fa", "Endpoint": "e2", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'used more than once'
+Test-ConfigError 'no arrays'  '{ "Shares": [ { "VeeamPath": "srv:/e" } ] }' 'No arrays are defined.*arrays\.jsonc'
+Test-ConfigError 'no shares'  '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ] }' 'Shares must list at least one share, or set Veeam.JobId'
+Test-ConfigError 'duplicate array' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" }, { "Name": "fa", "Endpoint": "e2", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" } ] }' 'defined more than once'
 Test-ConfigError 'unknown array ref' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fb" } ] }' "unknown array 'fb'"
 Test-ConfigError 'bad share path' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "C:\\share", "Array": "fa" } ] }' 'neither an SMB path'
 Test-ConfigError 'duplicate share' '{ "Arrays": [ { "Name": "fa", "Endpoint": "e", "ApiTokenFile": "t" } ], "Shares": [ { "VeeamPath": "srv:/e", "Array": "fa" }, { "VeeamPath": "srv:/e/", "Array": "fa" } ] }' 'listed more than once'

@@ -7,6 +7,40 @@ declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start 
 
 ## [Unreleased]
 
+### Added
+
+- **Shares from the job.** With `Veeam.JobId` set, the shares are read from the Veeam job at run
+  time; the job configuration needs no `Shares` list. Objects that are not SMB shares or NFS
+  exports are reported and skipped. `Shares` entries now override `Array` or `Source` for single
+  shares of the job.
+- **Shares mapped to arrays automatically.** A share without an `Array` belongs to the array that
+  owns its host address as a file interface (FlashArray service `file`, FlashBlade service
+  `data`); host names are resolved through DNS. The FlashBlade file server of that interface also
+  settles an export name that exists on two servers. An unreachable array is a warning while
+  every share still maps to another array.
+- **Global arrays file.** `arrays.jsonc` beside the job configurations (or `ArraysFile`) lists
+  every array once for all jobs; `arrays.sample.jsonc` documents it, and the generator creates it
+  empty the first time.
+- **State of the last run.** `<profile>.state.json` (default `<install>\state`, `State.Directory`
+  to change it) records each job's shares, arrays and sources. A run asks the arrays of the last
+  run first. Tagged snapshots on the source of a share that has left the job are cleaned up by
+  the sweep and the post phase until none is left.
+- **File-to-tape jobs.** The job guard, the share discovery and the generator's job lookup work
+  for file-to-tape jobs as well as file backup jobs.
+
+### Changed
+
+- With `Veeam.JobId` and the PowerShell backend, the job is the share list. A job share missing
+  from `Shares`, which 1.0.0 backed up live (verify reported it), is now protected. A `Shares`
+  entry for a share that is not in the job is ignored with a warning instead of being repointed.
+  Configurations without `Veeam.JobId`, and the REST backend, work as before.
+- `-NoJobGuard` keeps reading the job for its shares; it only skips the session check.
+- The post phase continues on the arrays it can reach when one is unreachable (exit code 4), and
+  leaves that array's sources for the next run.
+- The pre phase reports every share missing from the Veeam inventory at once, and the fail-safe
+  covers all the shares that were found.
+- The array API token also needs to read network interfaces (the `storage_admin` role does).
+
 ## [1.0.0] - 2026-10-22 <!-- style-check: ignore -->
 
 Initial release.

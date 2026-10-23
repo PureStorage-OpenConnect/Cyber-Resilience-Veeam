@@ -40,7 +40,7 @@ $script:EvpVersion = [string](Import-PowerShellDataFile -LiteralPath (Join-Path 
 # produced a transcript saying "Wrote secret" after the write had failed.
 $ErrorActionPreference = 'Stop'
 
-foreach ($layer in 'Common', 'Secrets', 'Logging', 'Http', 'Veeam', 'Pure', 'Orchestrate') {
+foreach ($layer in 'Common', 'Secrets', 'Logging', 'Http', 'Veeam', 'Pure', 'Discovery', 'Orchestrate') {
 	. (Join-Path $PSScriptRoot 'lib' "$layer.ps1")
 }
 
@@ -62,7 +62,7 @@ function Get-EvpVersion {
 
 Export-ModuleMember -Function @(
 	# Common
-	'Get-EvpPlatform', 'Initialize-EvpEnvironment', 'Get-EvpConfig', 'ConvertTo-EvpMilliseconds',
+	'Get-EvpPlatform', 'Initialize-EvpEnvironment', 'Get-EvpConfig', 'New-EvpShareRecord', 'ConvertTo-EvpMilliseconds',
 	'Get-EvpShareProtocol', 'Split-EvpSharePath', 'Get-EvpNormalizedSharePath', 'Get-EvpStorageSnapshotPath',
 	'Get-EvpTimestamp', 'Get-EvpDefaultSnapshotTag', 'New-EvpSnapshotName', 'Get-EvpSnapshotMatchPattern', 'Get-EvpSnapshotTimestamp', 'Get-EvpSentinelDirectoryName',
 	# Secrets
@@ -73,9 +73,12 @@ Export-ModuleMember -Function @(
 	'Set-EvpHttpInvoker', 'Invoke-EvpHttp', 'Get-EvpHttpErrorText', 'Get-EvpServerCertificateHash',
 	# Veeam
 	'Connect-EvpVeeam', 'Disconnect-EvpVeeam', 'Test-EvpVeeamModule', 'Get-EvpVeeamShares', 'Find-EvpVeeamShare', 'Set-EvpVeeamStorageSnapshotPath',
-	'Get-EvpVeeamJob', 'Get-EvpVeeamActiveJobSessions', 'Assert-EvpVeeamJobSession',
+	'Get-EvpVeeamJob', 'Find-EvpVeeamJobByName', 'Get-EvpVeeamActiveJobSessions', 'Assert-EvpVeeamJobSession',
 	# Pure
-	'Connect-EvpArray', 'Invoke-EvpArrayApi', 'Resolve-EvpArraySource', 'New-EvpArraySnapshot', 'Get-EvpArraySnapshots', 'Remove-EvpArraySnapshots',
+	'Connect-EvpArray', 'Invoke-EvpArrayApi', 'Get-EvpArrayFileInterfaces', 'Resolve-EvpArraySource', 'New-EvpArraySnapshot', 'Get-EvpArraySnapshots', 'Remove-EvpArraySnapshots',
+	# Discovery
+	'Get-EvpRunShares', 'Resolve-EvpShareHostAddress', 'Connect-EvpArraysForShares', 'Get-EvpDefaultStateDirectory', 'Get-EvpStatePath',
+	'Read-EvpState', 'Get-EvpCachedShareArray', 'Get-EvpOrphanSources', 'Invoke-EvpOrphanCleanup', 'Save-EvpState',
 	# Orchestrate
 	'Get-EvpExitCodeTable', 'Write-EvpPlan', 'Invoke-EvpPrePhase', 'Invoke-EvpPostPhase', 'Invoke-EvpVerifyPhase',
 	'Get-EvpModuleRoot', 'Get-EvpVersion'

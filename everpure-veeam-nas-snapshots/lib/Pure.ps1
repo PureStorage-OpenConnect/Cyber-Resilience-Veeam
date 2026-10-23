@@ -122,6 +122,34 @@ function Invoke-EvpArrayApi {
 	return $items.ToArray()
 }
 
+function Get-EvpArrayFileInterfaces {
+	<#
+	.SYNOPSIS
+		Lists the enabled interfaces that serve file shares, with their addresses.
+	.DESCRIPTION
+		FlashArray: network-interfaces whose services include 'file', address in eth.address.
+		FlashBlade: network-interfaces whose services include 'data', address in address, and
+		server.name, which tells which file server (and therefore which exports) the address
+		belongs to. Addresses are normalised through IPAddress, so IPv6 spellings compare equal.
+	.OUTPUTS
+		Records with Name, Address, Server (or $null).
+	#>
+	[CmdletBinding()]
+	[OutputType([object[]])]
+	param([Parameter(Mandatory)] $Session)
+	$service = if ($Session.Platform -eq 'FlashArray') { 'file' } else { 'data' }
+	$records = foreach ($i in @(Invoke-EvpArrayApi -Session $Session -Path 'network-interfaces')) {
+		if ($i.PSObject.Properties.Name -contains 'enabled' -and -not [bool]$i.enabled) { continue }
+		if (@($i.services) -notcontains $service) { continue }
+		$address = if ($i.eth -and $i.eth.address) { [string]$i.eth.address } else { [string]$i.address }
+		$ip = $null
+		if (-not [System.Net.IPAddress]::TryParse($address, [ref]$ip)) { continue }
+		$server = if ($i.server -and $i.server.name) { [string]$i.server.name } else { $null }
+		[pscustomobject]@{ Name = [string]$i.name; Address = $ip.ToString(); Server = $server }
+	}
+	return @($records)
+}
+
 #endregion
 
 #region Source resolution
@@ -134,7 +162,9 @@ function Resolve-EvpArraySource {
 		An explicit Share.Source wins. Otherwise FlashArray resolves the export name through
 		directory-exports (filtered by the share's protocol) to a managed directory, and
 		FlashBlade resolves the share name to a file system. The result carries whether the
-		snapshot directory is exposed, which the verify phase reports.
+		snapshot directory is exposed, which the verify phase reports. Share.ServerHint, the
+		file server of the interface the share was mapped through, settles an export name that
+		exists on more than one server.
 	#>
 	[CmdletBinding()]
 	[OutputType([psobject])]
@@ -150,6 +180,10 @@ function Resolve-EvpArraySource {
 		$matching = @($exports | Where-Object { [string]$_.policy.resource_type -like "*$proto*" -or [string]$_.policy.resource_type -eq '' })
 		if ($matching.Count -eq 0 -and $exports.Count -gt 0) { throw "FlashArray export '$shareName' exists but not for $($Share.Protocol) (policies: $(($exports | ForEach-Object { $_.policy.resource_type }) -join ', '))." }
 		$dirs = @($matching | ForEach-Object { [string]$_.directory.name } | Sort-Object -Unique)
+		if ($dirs.Count -gt 1 -and $Share.ServerHint) {
+			$onServer = @($matching | Where-Object { [string]$_.server.name -eq $Share.ServerHint } | ForEach-Object { [string]$_.directory.name } | Sort-Object -Unique)
+			if ($onServer.Count -gt 0) { $dirs = $onServer }
+		}
 		if ($dirs.Count -eq 0) { throw "FlashArray '$($Session.Endpoint)' has no directory export named '$shareName'. Check the share name or set Shares[].Source to the managed directory explicitly." }
 		if ($dirs.Count -gt 1) { throw "FlashArray export '$shareName' maps to $($dirs.Count) directories ($($dirs -join ', ')); set Shares[].Source explicitly." }
 		return (Get-EvpArraySourceInfo -Session $Session -SourceName $dirs[0])
@@ -162,7 +196,12 @@ function Resolve-EvpArraySource {
 	$exports = @()
 	try { $exports = @(Invoke-EvpArrayApi -Session $Session -Path 'file-system-exports' -Query @{ filter = $exportFilter }) }
 	catch { Write-Verbose "file-system-exports not available, using the file system name: $($_.Exception.Message)" }
-	$members = @($exports | Where-Object { [string]$_.policy_type -eq $Share.Protocol } | ForEach-Object { [string]$_.member.name } | Where-Object { $_ } | Sort-Object -Unique)
+	$ofProtocol = @($exports | Where-Object { [string]$_.policy_type -eq $Share.Protocol })
+	$members = @($ofProtocol | ForEach-Object { [string]$_.member.name } | Where-Object { $_ } | Sort-Object -Unique)
+	if ($members.Count -gt 1 -and $Share.ServerHint) {
+		$onServer = @($ofProtocol | Where-Object { [string]$_.server.name -eq $Share.ServerHint } | ForEach-Object { [string]$_.member.name } | Where-Object { $_ } | Sort-Object -Unique)
+		if ($onServer.Count -gt 0) { $members = $onServer }
+	}
 	if ($members.Count -gt 1) {
 		throw "FlashBlade $($Share.Protocol) export '$shareName' exists for $($members.Count) file systems ($($members -join ', ')) on different servers; set Shares[].Source explicitly."
 	}
