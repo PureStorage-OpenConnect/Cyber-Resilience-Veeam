@@ -11,6 +11,19 @@ directory or file system to snapshot are worked out at run time.
 > supported by Everpure or by the author. Read them, test them in a lab, and adapt them to your
 > environment before relying on them. See the [LICENSE](../LICENSE) and [NOTICE](../NOTICE).
 
+### Why this much code for a pre and post script?
+
+Yes, it is a lot. A first version of such a script takes a snapshot and sets a path in about
+twenty lines, and works on the day it is written. Most of the rest exists because the simple
+version backs up the wrong data without anyone noticing. Veeam only warns when a pre-job script
+fails and then runs the job anyway. A pre phase that half fails can therefore leave a share on
+last week's snapshot or on the live data while the job reports success. A cloned job can destroy
+the original's snapshots, and a share added to the job later is backed up live until someone edits
+the script. Each of those cases happened in the lab or follows from documented Veeam behaviour,
+and each one became a check, a fail-safe or a test. If you only need the twenty-line version for
+one share on one array, write that and keep it; this is the version for jobs that should keep
+working unattended.
+
 ## How it works
 
 A Veeam file backup or file-to-tape job runs the **pre** phase before it starts and the
