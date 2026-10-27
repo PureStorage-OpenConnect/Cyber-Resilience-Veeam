@@ -12,6 +12,11 @@ Veeam Backup & Replication automation and orchestration scripts for Everpure sto
 `veeam-fb-multi-obj-account-setup.ps1` takes its settings and credentials inline; edit the
 variables at the top before running it.
 
+Versions are per script, not per repository. A versioned script keeps its CHANGELOG in its
+folder, and its releases are tagged `<component>/v<version>`, for example `nas-snapshots/v1.1.0`
+for [everpure-veeam-nas-snapshots/](everpure-veeam-nas-snapshots/). `main` holds the latest
+release of every script; work in progress lives on `dev`.
+
 [docs/](docs/) holds the design plan for the unified scripts. The Veeam REST API defect that
 currently blocks the appliance is tracked in [this Veeam forum thread](https://forums.veeam.com/viewtopic.php?f=30&t=104809).
 
