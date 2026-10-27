@@ -35,7 +35,7 @@
 	        without changing anything. Run it after installation and after every config change.
 
 	Runs unchanged on a Windows backup server (Veeam PowerShell cmdlets) and on the Veeam
-	Software Appliance (REST API, once Veeam ships the fix for case #08278019). All behaviour
+	Software Appliance (REST API, blocked by a Veeam defect, see the README). All behaviour
 	comes from the configuration file; the script itself is never edited.
 
 .PARAMETER Phase

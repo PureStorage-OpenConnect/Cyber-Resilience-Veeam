@@ -173,7 +173,7 @@ $env:EVP_TEST_CONNECT_FAIL = $null
 Write-TestSection 'Veeam adapter: REST backend'
 $state = New-LabState; Use-LabMock $state; Reset-Logs
 $restCfg = Get-EvpConfig -Path (New-LabConfigFile -Directory (Join-Path $tmp 'rest') -Backend 'Rest')
-Assert-Throws 'defective build refused' { Connect-EvpVeeam -Config $restCfg -Platform $platform 6>$null } 'case #08278019'
+Assert-Throws 'defective build refused' { Connect-EvpVeeam -Config $restCfg -Platform $platform 6>$null } 'silently reads the live share'
 $state.VeeamBuild = '13.2.0.100'
 $rest = Connect-EvpVeeam -Config $restCfg -Platform $platform 6>$null
 Assert-Equal 'REST token obtained' $rest.Token 'vbr-token'

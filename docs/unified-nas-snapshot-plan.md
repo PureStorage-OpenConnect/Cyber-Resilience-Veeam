@@ -227,7 +227,7 @@ closed by the probe runs on 2026-10-16.
   Windows backup server, where the module is available to job scripts. `REST` for the
   appliance, enabled once Veeam exposes the `ThirdParty` mode in the REST enum. Until then the
   appliance can run the array side (snapshot create/destroy, sweep) but not the repoint.
-  Reported 2026-10-19 as Veeam case #08278019 (best effort, lab) and in the R&D forum:
+  Reported 2026-10-19 to Veeam support and in the R&D forum:
   <https://forums.veeam.com/viewtopic.php?f=30&t=104809>.
 * Lab shares verified on 2026-10-16: on FA, `192.0.2.10` is the realm VIP
   `realm-a::file-vip`; `finance-smb` maps to `fs01:finance-smb`,

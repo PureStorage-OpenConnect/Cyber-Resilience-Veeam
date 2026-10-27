@@ -5,6 +5,13 @@ here. The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/
 scripts follow [Semantic Versioning](https://semver.org/spec/v2.0.0.html). The version is
 declared as `ModuleVersion` in `EverpureVeeamNas.psd1` and printed at the start of every run.
 
+## [Unreleased]
+
+### Changed
+
+- The Veeam support case for the REST defect is cited only in the README, with its new number;
+  the error message of the REST backend and the configuration sample no longer name a case.
+
 ## [1.1.0] - 2026-10-23 <!-- style-check: ignore -->
 
 ### Added

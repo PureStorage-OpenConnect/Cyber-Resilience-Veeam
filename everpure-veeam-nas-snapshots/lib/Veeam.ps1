@@ -8,11 +8,9 @@
 	              module is available to job scripts. Sets the real "backup from a storage
 	              snapshot at this path" mode (internal ThirdParty).
 	  Rest        Veeam REST API v1 on port 9419. The only interface available to job scripts on
-	              the Veeam Software Appliance. On 13.1.1.x it maps processingMode
-	              'StorageSnapshot' to the wrong internal mode and the job silently reads the
-	              live share (Veeam case #08278019), so this backend refuses those builds unless
-	              Veeam.AcknowledgeRestDefect is set. Kept so the appliance works the day Veeam
-	              ships the fix.
+	              the Veeam Software Appliance. Refuses the defective builds 13.0/13.1 (see the
+	              README) unless Veeam.AcknowledgeRestDefect is set. Kept so the appliance works
+	              the day Veeam ships the fix.
 
 	The three operations the orchestration needs: list shares, point a share at a snapshot
 	path (failover off, mode enforced), and the same call with a sentinel path as the fail-safe.
@@ -294,10 +292,9 @@ function Connect-EvpVeeamRest {
 	$session.Build = [string]$info.buildVersion
 	Write-Host "Connected to Veeam REST API on '$server' (build $($session.Build), platform $($info.platform))."
 
-	# Builds with the processingMode mapping defect (Veeam case #08278019). The fixed build is
-	# not known yet; widen or remove this gate once Veeam names it.
+	# The fixed build is not known yet; widen or remove this gate once Veeam names it.
 	if ($session.Build -match '^13\.(0|1)\.' -and -not $Config.Veeam.AcknowledgeRestDefect) {
-		throw "Veeam build $($session.Build) maps the REST processingMode 'StorageSnapshot' to the wrong internal mode, so a share repointed through REST silently reads the live share (Veeam case #08278019). Use the PowerShell backend on a Windows server, or set Veeam.AcknowledgeRestDefect to true to proceed anyway at your own risk."
+		throw "Veeam build $($session.Build) maps the REST processingMode 'StorageSnapshot' to the wrong internal mode, so a share repointed through REST silently reads the live share. Use the PowerShell backend on a Windows server, or set Veeam.AcknowledgeRestDefect to true to proceed anyway at your own risk."
 	}
 	return $session
 }

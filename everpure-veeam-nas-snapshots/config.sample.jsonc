@@ -46,9 +46,8 @@
 		// script hangs until Veeam's 15-minute timeout.
 		"ForceAcceptTlsCertificate": true,
 
-		// REST backend only. Veeam 13.1.1.x maps the REST processingMode to the wrong internal
-		// mode (Veeam case #08278019): the job silently reads the live share. The REST backend
-		// therefore refuses those builds. Set true only to test at your own risk.
+		// REST backend only. It refuses Veeam 13.0/13.1 because of a Veeam REST defect (see the
+		// README). Set true only to test at your own risk.
 		"AcknowledgeRestDefect": false
 	},
 

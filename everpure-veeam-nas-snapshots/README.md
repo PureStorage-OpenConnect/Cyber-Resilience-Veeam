@@ -158,7 +158,7 @@ pwsh -File .\Invoke-EverpureVeeamNasSnapshot.ps1 -Phase post -ConfigFile .\jobs\
 | | Windows backup server | Veeam Software Appliance |
 | --- | --- | --- |
 | Veeam access | `Veeam.Backup.PowerShell` cmdlets (`Backend: auto` picks it) | REST API on port 9419 |
-| Status | **Working.** Tested as LOCAL SYSTEM on 13.1.1.18 | **Blocked by Veeam.** 13.1.1.x maps the REST processing mode to the wrong internal mode, so the job silently reads the live share (Veeam case #08278019, [forum thread](https://forums.veeam.com/viewtopic.php?f=30&t=104809)). The REST backend refuses those builds; set `Veeam.AcknowledgeRestDefect` only to test. |
+| Status | **Working.** Tested as LOCAL SYSTEM on 13.1.1.18 | **Blocked by Veeam.** 13.1.1.x maps the REST processing mode to the wrong internal mode, so the job silently reads the live share (Veeam case #08288368, [forum thread](https://forums.veeam.com/viewtopic.php?f=30&t=104809)). The REST backend refuses those builds; set `Veeam.AcknowledgeRestDefect` only to test. |
 | Veeam identity | Implicit (job runs as the Veeam service, LOCAL SYSTEM). Optional `Veeam.User` + `Veeam.PasswordFile` if the implicit connection is refused | Local Veeam user flagged as service account, MFA off, `Veeam.User` + `Veeam.PasswordFile` required |
 | Veeam address | `localhost` | FQDN or LAN address (loopback is firewalled for job scripts) |
 | Secrets | DPAPI LocalMachine + ACL restricted to SYSTEM and Administrators | Plain file, mode 0640, group `veeam-grp-data` |
